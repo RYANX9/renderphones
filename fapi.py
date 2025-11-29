@@ -234,47 +234,133 @@ def search_phones(
 
 @app.get("/phones/recommend")
 def recommend_phones(
-    use_case: str = Query(..., description="Use case: gamer, photographer, budget, flagship, battery"),
+    use_case: str = Query(..., description="Use case: gamer, photographer, budget, flagship, battery, performance, balanced"),
     max_price: Optional[float] = Query(None, description="Maximum budget in USD"),
+    min_price: Optional[float] = Query(None, description="Minimum price in USD"),
     limit: int = Query(10, ge=1, le=50),
 ):
+    """
+    Fast recommendation system with SQL-based sorting
+    """
     use_case = use_case.lower()
+    
     with get_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Base filters
         where = ["price_usd IS NOT NULL"]
         if max_price:
             where.append(f"price_usd <= {max_price}")
-
+        if min_price:
+            where.append(f"price_usd >= {min_price}")
+        
+        # Define ORDER BY and filters for each use case
+        order_by = ""
+        additional_filters = []
+        
         if use_case == "gamer":
-            where += ["gpu_score IS NOT NULL", "fast_charging_w >= 65", "battery_capacity >= 5000", "12 = ANY(ram_options) OR 16 = ANY(ram_options)"]
-            order = "gpu_score DESC, antutu_score DESC"
+            # Gamers want: performance + battery + fast charging
+            order_by = """
+                COALESCE(antutu_score, 0) * 0.5 + 
+                COALESCE(gpu_score, 0) * 0.0015 + 
+                COALESCE(battery_capacity, 0) * 0.015 + 
+                COALESCE(fast_charging_w, 0) * 0.5 DESC
+            """
+            additional_filters = [
+                "(8 = ANY(ram_options) OR 12 = ANY(ram_options) OR 16 = ANY(ram_options))",
+                "battery_capacity >= 4500"
+            ]
+            
         elif use_case == "photographer":
-            where += ["main_camera_mp >= 62", "screen_size >= 6.0"]
-            order = "main_camera_mp DESC, screen_size DESC"
+            # Photographers want: camera MP + battery + screen
+            order_by = """
+                COALESCE(main_camera_mp, 0) * 2 + 
+                COALESCE(battery_capacity, 0) * 0.01 + 
+                COALESCE(screen_size, 0) * 10 DESC
+            """
+            additional_filters = [
+                "main_camera_mp >= 48",
+                "screen_size >= 6.0"
+            ]
+            
         elif use_case == "budget":
-            order = "price_usd ASC, antutu_score DESC"
+            # Budget: cheapest with decent specs
+            order_by = "price_usd ASC, battery_capacity DESC, main_camera_mp DESC"
+            if not max_price:
+                where.append("price_usd <= 350")
+            additional_filters = ["battery_capacity >= 4000"]
+                
         elif use_case == "flagship":
-            where += ["price_usd >= 700", "antutu_score IS NOT NULL"]
-            order = "antutu_score DESC, price_usd DESC"
+            # Flagship: best performance + camera + charging
+            order_by = """
+                COALESCE(antutu_score, 0) * 0.4 + 
+                COALESCE(main_camera_mp, 0) * 3000 + 
+                COALESCE(fast_charging_w, 0) * 1500 DESC
+            """
+            additional_filters = [
+                "(8 = ANY(ram_options) OR 12 = ANY(ram_options) OR 16 = ANY(ram_options))",
+                "price_usd >= 500"
+            ]
+            
         elif use_case == "battery":
-            where += ["battery_capacity >= 5000"]
-            order = "battery_capacity DESC, fast_charging_w DESC"
+            # Battery: capacity + fast charging
+            order_by = """
+                COALESCE(battery_capacity, 0) * 0.6 + 
+                COALESCE(fast_charging_w, 0) * 4 DESC
+            """
+            additional_filters = ["battery_capacity >= 5000"]
+            
+        elif use_case == "performance":
+            # Performance: AnTuTu + GPU + RAM
+            order_by = """
+                COALESCE(antutu_score, 0) * 0.5 + 
+                COALESCE(gpu_score, 0) * 0.002 DESC
+            """
+            additional_filters = [
+                "(8 = ANY(ram_options) OR 12 = ANY(ram_options) OR 16 = ANY(ram_options))"
+            ]
+            
+        elif use_case == "balanced":
+            # Balanced: everything matters
+            order_by = """
+                COALESCE(antutu_score, 0) * 0.0003 + 
+                COALESCE(battery_capacity, 0) * 0.015 + 
+                COALESCE(main_camera_mp, 0) * 1.5 + 
+                COALESCE(fast_charging_w, 0) * 0.8 DESC
+            """
         else:
-            raise HTTPException(status_code=400, detail="Invalid use case")
-
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid use case. Choose: gamer, photographer, budget, flagship, battery, performance, balanced"
+            )
+        
+        where.extend(additional_filters)
         where_clause = " AND ".join(where)
+        
+        # Single fast query with SQL sorting
         query = f"""
-            SELECT id, model_name, brand, price_usd, main_image_url, screen_size, battery_capacity,
-                   ram_options, main_camera_mp, chipset, antutu_score, gpu_score, fast_charging_w,
-                   release_year, release_month, release_day, release_date_full
+            SELECT 
+                id, model_name, brand, price_usd, main_image_url, 
+                screen_size, battery_capacity, ram_options, main_camera_mp, 
+                chipset, antutu_score, gpu_score, fast_charging_w,
+                storage_options, weight_g, release_year, release_date_full
             FROM phones
             WHERE {where_clause}
-            ORDER BY {order}
+            ORDER BY {order_by}
             LIMIT {limit}
         """
+        
         cursor.execute(query)
         rows = cursor.fetchall()
-        return {"use_case": use_case, "max_price": max_price, "count": len(rows), "recommendations": rows}
+        
+        return {
+            "use_case": use_case,
+            "max_price": max_price,
+            "min_price": min_price,
+            "count": len(rows),
+            "recommendations": [dict(row) for row in rows]
+        }
+    
 
 @app.get("/phones/latest")
 def get_latest_phones(limit: int = Query(20, ge=1, le=50)):
