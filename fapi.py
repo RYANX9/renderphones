@@ -134,11 +134,13 @@ class SearchResponse(BaseModel):
     results: List[PhoneBasic]
 
 class FilterStats(BaseModel):
-    brands: List[dict]
+    total_phones: int
+    total_brands: int
+    brands: list[dict]
     price_range: dict
-    ram_options: List[int]
+    ram_options: list[int]
     battery_range: dict
-    release_years: List[int]
+    release_years: list[int]
 
 # ------------------------------------------------------------------
 # ENDPOINTS
@@ -361,7 +363,7 @@ def recommend_phones(
             "recommendations": [dict(row) for row in rows]
         }
     
-
+    
 @app.get("/phones/latest")
 def get_latest_phones(limit: int = Query(20, ge=1, le=50)):
     with get_db() as conn:
@@ -406,22 +408,59 @@ def get_phone_details(phone_id: int):
 def get_filter_stats():
     with get_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT brand, COUNT(*) AS count FROM phones WHERE brand IS NOT NULL GROUP BY brand ORDER BY count DESC")
+
+        # ----------  NEW: global counters  ----------
+        cursor.execute("SELECT COUNT(*) AS total_phones FROM phones")
+        total_phones = cursor.fetchone()["total_phones"]
+
+        cursor.execute("SELECT COUNT(DISTINCT brand) AS total_brands FROM phones WHERE brand IS NOT NULL")
+        total_brands = cursor.fetchone()["total_brands"]
+        # --------------------------------------------
+
+        cursor.execute(
+            "SELECT brand, COUNT(*) AS count "
+            "FROM phones WHERE brand IS NOT NULL "
+            "GROUP BY brand ORDER BY count DESC"
+        )
         brands = cursor.fetchall()
 
-        cursor.execute("SELECT MIN(price_usd) AS min_price, MAX(price_usd) AS max_price, ROUND(AVG(price_usd)::numeric, 2) AS avg_price FROM phones WHERE price_usd IS NOT NULL")
+        cursor.execute(
+            "SELECT MIN(price_usd) AS min_price, MAX(price_usd) AS max_price, "
+            "ROUND(AVG(price_usd)::numeric, 2) AS avg_price "
+            "FROM phones WHERE price_usd IS NOT NULL"
+        )
         price_range = cursor.fetchone()
 
-        cursor.execute("SELECT DISTINCT unnest(ram_options) AS ram FROM phones WHERE ram_options IS NOT NULL ORDER BY ram")
+        cursor.execute(
+            "SELECT DISTINCT unnest(ram_options) AS ram "
+            "FROM phones WHERE ram_options IS NOT NULL ORDER BY ram"
+        )
         ram_options = [r["ram"] for r in cursor.fetchall()]
 
-        cursor.execute("SELECT MIN(battery_capacity) AS min_battery, MAX(battery_capacity) AS max_battery FROM phones WHERE battery_capacity IS NOT NULL")
+        cursor.execute(
+            "SELECT MIN(battery_capacity) AS min_battery, "
+            "MAX(battery_capacity) AS max_battery "
+            "FROM phones WHERE battery_capacity IS NOT NULL"
+        )
         battery_range = cursor.fetchone()
 
-        cursor.execute("SELECT DISTINCT release_year FROM phones WHERE release_year IS NOT NULL ORDER BY release_year DESC")
+        cursor.execute(
+            "SELECT DISTINCT release_year FROM phones "
+            "WHERE release_year IS NOT NULL ORDER BY release_year DESC"
+        )
         release_years = [r["release_year"] for r in cursor.fetchall()]
 
-        return {"brands": brands, "price_range": price_range, "ram_options": ram_options, "battery_range": battery_range, "release_years": release_years}
+        return {
+            "total_phones": total_phones,
+            "total_brands": total_brands,
+            "brands": brands,
+            "price_range": price_range,
+            "ram_options": ram_options,
+            "battery_range": battery_range,
+            "release_years": release_years,
+        }
+
+
 
 @app.get("/brands/{brand}/phones")
 def get_brand_phones(
@@ -458,4 +497,6 @@ def get_brand_phones(
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
+    print('run uvicorn fapi:app --reload')
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+
