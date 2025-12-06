@@ -151,7 +151,7 @@ def root():
 
 @app.get("/phones/search", response_model=SearchResponse)
 def search_phones(
-    q: Optional[str] = Query(None, description="Search query (model, brand, chipset)"),
+    q: Optional[str] = Query(None, description="Search query (model, brand, chipset, specs)"),
     min_price: Optional[float] = Query(None, ge=0),
     max_price: Optional[float] = Query(None, ge=0),
     min_ram: Optional[int] = Query(None, ge=2, le=24),
@@ -166,17 +166,107 @@ def search_phones(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
+    """
+    Advanced search with deep JSON spec searching
+    Searches in: model, brand, chipset, OS, CPU, GPU, display type, camera features, 
+    connectivity (Wi-Fi, Bluetooth, NFC, 5G), sensors, and all nested specifications
+    """
     with get_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         conditions, params = [], []
 
+        # ENHANCED TEXT SEARCH - searches everywhere including JSON specs
         if q:
             expanded = expand_search_query(q)
-            for word in expanded.strip().split():
+            words = expanded.strip().split()
+            
+            for word in words:
                 term = f"%{word}%"
-                conditions.append("(LOWER(model_name) LIKE LOWER(%s) OR LOWER(brand) LIKE LOWER(%s) OR LOWER(chipset) LIKE LOWER(%s))")
-                params.extend([term, term, term])
+                
+                # Build comprehensive search condition for this word
+                search_conditions = [
+                    # Basic fields
+                    "LOWER(model_name) LIKE LOWER(%s)",
+                    "LOWER(brand) LIKE LOWER(%s)",
+                    "LOWER(chipset) LIKE LOWER(%s)",
+                    
+                    # JSON Platform specs (OS, CPU, GPU, Chipset details)
+                    "LOWER(full_specifications::text) LIKE LOWER(%s)",
+                    
+                    # Specific JSON paths for better matching
+                    "LOWER(full_specifications->'specifications'->'Platform'->>'OS') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Platform'->>'CPU') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Platform'->>'GPU') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Platform'->>'Chipset') LIKE LOWER(%s)",
+                    
+                    # Display specs (type, refresh rate, protection)
+                    "LOWER(full_specifications->'specifications'->'Display'->>'Type') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Display'->>'Size') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Display'->>'Resolution') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Display'->>'Protection') LIKE LOWER(%s)",
+                    
+                    # Camera specs (main, selfie, features, video)
+                    "LOWER(full_specifications->'specifications'->'Main Camera'->>'Single') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Main Camera'->>'Dual') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Main Camera'->>'Triple') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Main Camera'->>'Quad') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Main Camera'->>'Features') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Main Camera'->>'Video') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Selfie Camera'->>'Single') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Selfie Camera'->>'Features') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Selfie Camera'->>'Video') LIKE LOWER(%s)",
+                    
+                    # Connectivity (Wi-Fi, Bluetooth, USB, NFC, 5G)
+                    "LOWER(full_specifications->'specifications'->'Comms'->>'WLAN') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Comms'->>'Bluetooth') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Comms'->>'Positioning') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Comms'->>'NFC') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Comms'->>'Radio') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Comms'->>'USB') LIKE LOWER(%s)",
+                    
+                    # Network (5G, 4G, bands)
+                    "LOWER(full_specifications->'specifications'->'Network'->>'Technology') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Network'->>'2G bands') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Network'->>'3G bands') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Network'->>'4G bands') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Network'->>'5G bands') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Network'->>'Speed') LIKE LOWER(%s)",
+                    
+                    # Body & Build
+                    "LOWER(full_specifications->'specifications'->'Body'->>'Build') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Body'->>'SIM') LIKE LOWER(%s)",
+                    
+                    # Sound features
+                    "LOWER(full_specifications->'specifications'->'Sound'->>'Loudspeaker') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Sound'->>'3.5mm jack') LIKE LOWER(%s)",
+                    
+                    # Features (sensors, fingerprint, etc)
+                    "LOWER(full_specifications->'specifications'->'Features'->>'Sensors') LIKE LOWER(%s)",
+                    
+                    # Memory
+                    "LOWER(full_specifications->'specifications'->'Memory'->>'Card slot') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Memory'->>'Internal') LIKE LOWER(%s)",
+                    
+                    # Battery
+                    "LOWER(full_specifications->'specifications'->'Battery'->>'Type') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Battery'->>'Charging') LIKE LOWER(%s)",
+                    
+                    # Misc
+                    "LOWER(full_specifications->'specifications'->'Misc'->>'Colors') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Misc'->>'Models') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Misc'->>'SAR') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Misc'->>'SAR EU') LIKE LOWER(%s)",
+                    "LOWER(full_specifications->'specifications'->'Misc'->>'Price') LIKE LOWER(%s)",
+                ]
+                
+                # Wrap all search conditions in OR
+                combined_search = "(" + " OR ".join(search_conditions) + ")"
+                conditions.append(combined_search)
+                
+                # Add the search term for each condition (45 times for 45 conditions)
+                params.extend([term] * len(search_conditions))
 
+        # Standard filters
         if min_price is not None:
             conditions.append("price_usd >= %s")
             params.append(min_price)
@@ -206,14 +296,18 @@ def search_phones(
             params.append(min_year)
 
         where = " AND ".join(conditions) if conditions else "1=1"
+        
+        # Sorting
         valid_sorts = ['price_usd', 'battery_capacity', 'release_year', 'screen_size', 'main_camera_mp', 'antutu_score', 'release_month', 'release_day']
         sort_by = sort_by if sort_by in valid_sorts else 'release_year'
         sort_order = sort_order if sort_order in {'asc', 'desc'} else 'desc'
 
+        # Count total
         count_sql = f"SELECT COUNT(*) as total FROM phones WHERE {where}"
         cursor.execute(count_sql, params)
         total = cursor.fetchone()['total']
 
+        # Get results
         offset = (page - 1) * page_size
         if sort_by == 'release_year':
             order = f"release_year {sort_order} NULLS LAST, release_month {sort_order} NULLS LAST, release_day {sort_order} NULLS LAST"
@@ -233,7 +327,7 @@ def search_phones(
         results = cursor.fetchall()
 
         return {"total": total, "page": page, "page_size": page_size, "results": results}
-
+        
 @app.get("/phones/recommend")
 def recommend_phones(
     use_case: str = Query(..., description="Use case: gamer, photographer, budget, flagship, battery, performance, balanced"),
