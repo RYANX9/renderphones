@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import secrets
-import jwt
+import hashlib
+import uuid
 
 DB_CONFIG_PHONES = {
     "host": "ep-twilight-brook-agshqx5x-pooler.c-2.eu-central-1.aws.neon.tech",
@@ -34,9 +35,7 @@ DB_CONFIG_USERS = {
     "sslmode": "require",
 }
 
-JWT_SECRET = "mobylite_secret_key_change_in_production"
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24 * 7
+TOKEN_EXPIRATION_HOURS = 24 * 7
 
 @contextmanager
 def get_phones_db():
@@ -165,21 +164,39 @@ class PriceAlertCreate(BaseModel):
     target_price: float
 
 def create_token(user_id: str) -> str:
-    payload = {
-        "user_id": user_id,
-        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    token = secrets.token_urlsafe(32)
+    expiry = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRATION_HOURS)
+    
+    with get_users_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO user_sessions (user_id, token, expires_at) VALUES (%s, %s, %s)",
+            (user_id, token, expiry)
+        )
+        conn.commit()
+    
+    return token
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload["user_id"]
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    token = credentials.credentials
+    
+    with get_users_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "SELECT user_id, expires_at FROM user_sessions WHERE token = %s",
+            (token,)
+        )
+        session = cursor.fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        if datetime.utcnow() > session["expires_at"]:
+            cursor.execute("DELETE FROM user_sessions WHERE token = %s", (token,))
+            conn.commit()
+            raise HTTPException(status_code=401, detail="Token expired")
+        
+        return str(session["user_id"])
 
 @app.get("/")
 def root():
