@@ -266,8 +266,9 @@ def add_favorite(phone_id: int, notes: Optional[str] = None, user_id: str = Depe
             conn.commit()
             return {"success": True, "favorite": result}
         except psycopg2.IntegrityError:
-            raise HTTPException(status_code=400, detail="Already in favorites")
-
+            conn.rollback()
+            return {"success": True, "message": "Already in favorites"}
+            
 @app.get("/favorites")
 def get_favorites(user_id: str = Depends(verify_token)):
     with get_users_db() as conn:
