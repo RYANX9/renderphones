@@ -302,8 +302,8 @@ def remove_favorite(phone_id: int, user_id: str = Depends(verify_token)):
         conn.commit()
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Favorite not found")
-    return {"success": True}
-
+    return {"success": True, "message": "Favorite removed"}
+    
 @app.post("/reviews")
 def create_review(review: ReviewCreate, user_id: str = Depends(verify_token)):
     with get_users_db() as conn:
