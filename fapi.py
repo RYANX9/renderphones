@@ -46,9 +46,13 @@ def get_phones_db():
         conn.close()
 
 @contextmanager
-def get_users_db():
+def get_users_db(user_id: Optional[str] = None):
     conn = psycopg2.connect(**DB_CONFIG_USERS)
     try:
+        if user_id:
+            cursor = conn.cursor()
+            cursor.execute("SET LOCAL app.current_user_id = %s", (user_id,))
+            conn.commit()
         yield conn
     finally:
         conn.close()
@@ -258,24 +262,29 @@ class FavoriteCreate(BaseModel):
     notes: Optional[str] = None
     
 @app.post("/favorites")
-def add_favorite(phone_id: int, notes: Optional[str] = None, user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+def add_favorite(data: FavoriteCreate, user_id: str = Depends(verify_token)):
+    with get_users_db(user_id) as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute(
                 "INSERT INTO favorites (user_id, phone_id, notes) VALUES (%s, %s, %s) RETURNING id, created_at",
-                (user_id, phone_id, notes)
+                (user_id, data.phone_id, data.notes)
             )
             result = cursor.fetchone()
             conn.commit()
             return {"success": True, "favorite": result}
-        except psycopg2.IntegrityError:
+        except psycopg2.IntegrityError as e:
             conn.rollback()
+            print(f"Integrity error: {e}")
             return {"success": True, "message": "Already in favorites"}
-            
+        except Exception as e:
+            conn.rollback()
+            print(f"Error adding favorite: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/favorites")
 def get_favorites(user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             "SELECT phone_id, notes, created_at FROM favorites WHERE user_id = %s ORDER BY created_at DESC",
@@ -300,7 +309,7 @@ def get_favorites(user_id: str = Depends(verify_token)):
 
 @app.delete("/favorites/{phone_id}")
 def remove_favorite(phone_id: int, user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM favorites WHERE user_id = %s AND phone_id = %s", (user_id, phone_id))
         conn.commit()
