@@ -354,7 +354,7 @@ def get_phone_reviews(phone_id: int, page: int = 1, page_size: int = 10):
         cursor.execute("SELECT AVG(rating) as avg_rating FROM reviews WHERE phone_id = %s AND is_visible = TRUE", (phone_id,))
         avg_rating = cursor.fetchone()["avg_rating"] or 0
     
-    return {"total": total, "avg_rating": float(avg_rating), "reviews": reviews}
+    return {"success": True, "total": total, "avg_rating": float(avg_rating), "reviews": reviews}
 
 @app.get("/reviews/user")
 def get_user_reviews(user_id: str = Depends(verify_token)):
