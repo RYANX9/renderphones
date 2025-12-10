@@ -249,7 +249,7 @@ def login(data: LoginRequest):
 
 @app.get("/auth/me")
 def get_current_user(user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:  # Passing user_id is fine here
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SELECT id, email, display_name, avatar_url, created_at FROM users WHERE id = %s", (user_id,))
         user = cursor.fetchone()
@@ -319,7 +319,7 @@ def remove_favorite(phone_id: int, user_id: str = Depends(verify_token)):
     
 @app.post("/reviews")
 def create_review(review: ReviewCreate, user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:  # Pass user_id
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute(
@@ -358,14 +358,14 @@ def get_phone_reviews(phone_id: int, page: int = 1, page_size: int = 10):
 
 @app.get("/reviews/user")
 def get_user_reviews(user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:  # Pass user_id
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SELECT * FROM reviews WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
         return {"reviews": cursor.fetchall()}
 
 @app.post("/price-alerts")
 def create_price_alert(alert: PriceAlertCreate, user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:  # Pass user_id
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute(
@@ -380,14 +380,14 @@ def create_price_alert(alert: PriceAlertCreate, user_id: str = Depends(verify_to
 
 @app.get("/price-alerts")
 def get_price_alerts(user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:  # Pass user_id
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SELECT * FROM price_alerts WHERE user_id = %s AND is_active = TRUE ORDER BY created_at DESC", (user_id,))
         return {"alerts": cursor.fetchall()}
 
 @app.delete("/price-alerts/{alert_id}")
 def delete_price_alert(alert_id: str, user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:  # Pass user_id
         cursor = conn.cursor()
         cursor.execute("DELETE FROM price_alerts WHERE id = %s AND user_id = %s", (alert_id, user_id))
         conn.commit()
