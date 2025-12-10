@@ -515,6 +515,88 @@ def get_phone_details(phone_id: int):
             raise HTTPException(status_code=404, detail="Phone not found")
         return row
 
+@app.get("/phones/{phone_id}/stats")
+def get_phone_stats(phone_id: int):
+    """
+    Get comprehensive statistics for a phone:
+    - Average rating from reviews
+    - Total reviews count
+    - Total favorites count
+    - Rating distribution (1-5 stars)
+    - Verified owner percentage
+    """
+    stats = {
+        "average_rating": 0,
+        "total_reviews": 0,
+        "total_favorites": 0,
+        "rating_distribution": {
+            "5": 0,
+            "4": 0,
+            "3": 0,
+            "2": 0,
+            "1": 0
+        },
+        "verified_owners_percentage": 0
+    }
+    
+    # Get reviews stats
+    with get_users_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Total reviews and average rating
+        cursor.execute(
+            """SELECT 
+                COUNT(*) as total_reviews,
+                COALESCE(AVG(rating), 0) as avg_rating,
+                COUNT(CASE WHEN verified_owner = TRUE THEN 1 END) as verified_count
+               FROM reviews 
+               WHERE phone_id = %s AND is_visible = TRUE""",
+            (phone_id,)
+        )
+        review_data = cursor.fetchone()
+        
+        if review_data:
+            stats["total_reviews"] = review_data["total_reviews"]
+            stats["average_rating"] = float(review_data["avg_rating"])
+            
+            # Calculate verified percentage
+            if stats["total_reviews"] > 0:
+                stats["verified_owners_percentage"] = round(
+                    (review_data["verified_count"] / stats["total_reviews"]) * 100, 
+                    1
+                )
+        
+        # Rating distribution
+        cursor.execute(
+            """SELECT 
+                FLOOR(rating) as star_rating,
+                COUNT(*) as count
+               FROM reviews 
+               WHERE phone_id = %s AND is_visible = TRUE
+               GROUP BY FLOOR(rating)
+               ORDER BY star_rating DESC""",
+            (phone_id,)
+        )
+        
+        for row in cursor.fetchall():
+            star = str(int(row["star_rating"]))
+            if star in stats["rating_distribution"]:
+                stats["rating_distribution"][star] = row["count"]
+        
+        # Total favorites
+        cursor.execute(
+            "SELECT COUNT(*) as total_favorites FROM favorites WHERE phone_id = %s",
+            (phone_id,)
+        )
+        fav_data = cursor.fetchone()
+        if fav_data:
+            stats["total_favorites"] = fav_data["total_favorites"]
+    
+    return {
+        "success": True,
+        "stats": stats
+    }
+
 @app.get("/filters/stats", response_model=FilterStats)
 def get_filter_stats():
     with get_phones_db() as conn:
