@@ -252,7 +252,11 @@ def get_current_user(user_id: str = Depends(verify_token)):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return user
-
+        
+class FavoriteCreate(BaseModel):
+    phone_id: int
+    notes: Optional[str] = None
+    
 @app.post("/favorites")
 def add_favorite(phone_id: int, notes: Optional[str] = None, user_id: str = Depends(verify_token)):
     with get_users_db() as conn:
