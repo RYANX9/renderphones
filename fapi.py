@@ -280,7 +280,7 @@ def get_favorites(user_id: str = Depends(verify_token)):
         favorites = cursor.fetchall()
     
     if not favorites:
-        return {"favorites": []}
+        return {"success": True, "favorites": []}
     
     phone_ids = [f["phone_id"] for f in favorites]
     with get_phones_db() as conn:
@@ -292,7 +292,7 @@ def get_favorites(user_id: str = Depends(verify_token)):
     for fav in favorites:
         fav["phone"] = phones.get(fav["phone_id"])
     
-    return {"favorites": favorites}
+    return {"success": True, "favorites": favorites}
 
 @app.delete("/favorites/{phone_id}")
 def remove_favorite(phone_id: int, user_id: str = Depends(verify_token)):
