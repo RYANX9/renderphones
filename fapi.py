@@ -500,9 +500,17 @@ def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: in
 def get_latest_phones(limit: int = 20):
     with get_phones_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""SELECT id, model_name, brand, price_usd, main_image_url, screen_size, battery_capacity,
-                   ram_options, main_camera_mp, chipset, antutu_score, release_year
-            FROM phones WHERE release_year IS NOT NULL ORDER BY release_year DESC, release_month DESC LIMIT %s""", (limit,))
+        cursor.execute(
+            """SELECT id, model_name, brand, price_usd, main_image_url,
+                      screen_size, battery_capacity, ram_options,
+                      main_camera_mp, chipset, antutu_score,
+                      release_date                          -- ← full date
+               FROM   phones
+               WHERE  release_date IS NOT NULL
+               ORDER  BY release_date DESC
+               LIMIT  %s""",
+            (limit,)
+        )
         return {"phones": cursor.fetchall()}
 
 @app.get("/phones/{phone_id}", response_model=PhoneDetail)
