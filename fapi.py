@@ -507,9 +507,12 @@ def get_latest_phones(limit: int = 20):
                       release_year, release_month, release_day,
                       release_date_full
                FROM   phones
-               WHERE  release_date_full IS NOT NULL
-               ORDER  BY TO_DATE(regexp_replace(release_date_full, '^Released ', ''),
-                                 'YYYY, Month DD') DESC
+               WHERE  release_year IS NOT NULL
+                 AND  release_month IS NOT NULL
+                 AND  release_day IS NOT NULL
+               ORDER  BY release_year DESC,
+                         release_month DESC,
+                         release_day DESC
                LIMIT  %s""",
             (limit,)
         )
