@@ -415,15 +415,18 @@ def search_phones(
     with get_phones_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         conditions, params = [], []
+        has_search_query = bool(q and q.strip())
 
-        if q:
+        if has_search_query:
             expanded = expand_search_query(q)
             words = expanded.strip().split()
             
             for word in words:
                 term = f"%{word}%"
                 search_conditions = [
-                    "LOWER(model_name) LIKE LOWER(%s)", "LOWER(brand) LIKE LOWER(%s)", "LOWER(chipset) LIKE LOWER(%s)",
+                    "LOWER(model_name) LIKE LOWER(%s)", 
+                    "LOWER(brand) LIKE LOWER(%s)", 
+                    "LOWER(chipset) LIKE LOWER(%s)",
                     "LOWER(full_specifications::text) LIKE LOWER(%s)",
                     "LOWER(full_specifications->'specifications'->'Platform'->>'OS') LIKE LOWER(%s)",
                     "LOWER(full_specifications->'specifications'->'Platform'->>'CPU') LIKE LOWER(%s)",
@@ -456,6 +459,9 @@ def search_phones(
         if brand:
             conditions.append("LOWER(brand) = LOWER(%s)")
             params.append(brand)
+        if min_year:
+            conditions.append("release_year >= %s")
+            params.append(min_year)
 
         where = " AND ".join(conditions) if conditions else "1=1"
         
@@ -463,17 +469,56 @@ def search_phones(
         total = cursor.fetchone()['total']
 
         offset = (page - 1) * page_size
-        # Build ORDER BY clause with proper date sorting
-        if sort_by == 'release_year':
-            order_clause = f"release_year {sort_order} NULLS LAST, release_month {sort_order} NULLS LAST, release_day {sort_order} NULLS LAST"
+        
+        # ✅ SMART SORTING: If search query exists, sort by relevance first
+        if has_search_query:
+            # Calculate relevance score for each search term
+            expanded = expand_search_query(q)
+            words = expanded.strip().split()
+            search_term = words[0] if words else expanded  # Use first word for primary ranking
+            
+            # Relevance scoring:
+            # 1. Exact match at start of model_name = highest priority
+            # 2. Exact match at start of any word in model_name = high priority
+            # 3. Contains in model_name = medium priority
+            # 4. Contains in brand = low priority
+            # 5. Contains anywhere else = lowest priority
+            relevance_score = f"""
+                CASE
+                    WHEN LOWER(model_name) LIKE LOWER(%s) THEN 1000
+                    WHEN LOWER(model_name) LIKE LOWER(%s) THEN 900
+                    WHEN LOWER(model_name) LIKE LOWER(%s) THEN 800
+                    WHEN LOWER(brand) LIKE LOWER(%s) THEN 700
+                    WHEN LOWER(brand) LIKE LOWER(%s) THEN 600
+                    ELSE 500
+                END
+            """
+            
+            # Add relevance params: exact start, word start, contains in model, exact brand, contains brand
+            relevance_params = [
+                f"{search_term}%",           # Starts with (model)
+                f"% {search_term}%",         # Word starts with (model)
+                f"%{search_term}%",          # Contains (model)
+                f"{search_term}%",           # Starts with (brand)
+                f"%{search_term}%",          # Contains (brand)
+            ]
+            
+            order_clause = f"({relevance_score}) DESC, release_year DESC NULLS LAST, release_month DESC NULLS LAST"
+            query_params = params + relevance_params + [page_size, offset]
         else:
-            order_clause = f"{sort_by} {sort_order} NULLS LAST"
+            # ✅ NORMAL SORTING: Use user-selected sort when no search
+            if sort_by == 'release_year':
+                order_clause = f"release_year {sort_order} NULLS LAST, release_month {sort_order} NULLS LAST, release_day {sort_order} NULLS LAST"
+            else:
+                order_clause = f"{sort_by} {sort_order} NULLS LAST"
+            query_params = params + [page_size, offset]
         
         sql = f"""SELECT id, model_name, brand, price_usd, main_image_url, screen_size, battery_capacity,
                    ram_options, main_camera_mp, chipset, antutu_score, amazon_link,
                    release_year, release_month, release_day, release_date_full
             FROM phones WHERE {where} ORDER BY {order_clause} LIMIT %s OFFSET %s"""
-        cursor.execute(sql, params + [page_size, offset])
+        
+        cursor.execute(sql, query_params)
         results = cursor.fetchall()
 
         return {"total": total, "page": page, "page_size": page_size, "results": results}
