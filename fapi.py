@@ -473,7 +473,7 @@ def search_phones(
         return {"total": total, "page": page, "page_size": page_size, "results": results}
 
 @app.get("/phones/recommend")
-def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: int = 10):
+def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: int = 50):
     with get_phones_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         where = ["price_usd IS NOT NULL"]
@@ -497,7 +497,7 @@ def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: in
         return {"use_case": use_case, "recommendations": cursor.fetchall()}
 
 @app.get("/phones/latest")
-def get_latest_phones(limit: int = 20):
+def get_latest_phones(limit: int = 50):
     with get_phones_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
