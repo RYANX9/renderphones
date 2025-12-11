@@ -463,10 +463,16 @@ def search_phones(
         total = cursor.fetchone()['total']
 
         offset = (page - 1) * page_size
+        # Build ORDER BY clause with proper date sorting
+        if sort_by == 'release_year':
+            order_clause = f"release_year {sort_order} NULLS LAST, release_month {sort_order} NULLS LAST, release_day {sort_order} NULLS LAST"
+        else:
+            order_clause = f"{sort_by} {sort_order} NULLS LAST"
+        
         sql = f"""SELECT id, model_name, brand, price_usd, main_image_url, screen_size, battery_capacity,
                    ram_options, main_camera_mp, chipset, antutu_score, amazon_link,
                    release_year, release_month, release_day, release_date_full
-            FROM phones WHERE {where} ORDER BY {sort_by} {sort_order} NULLS LAST LIMIT %s OFFSET %s"""
+            FROM phones WHERE {where} ORDER BY {order_clause} LIMIT %s OFFSET %s"""
         cursor.execute(sql, params + [page_size, offset])
         results = cursor.fetchall()
 
