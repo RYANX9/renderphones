@@ -504,10 +504,12 @@ def get_latest_phones(limit: int = 20):
             """SELECT id, model_name, brand, price_usd, main_image_url,
                       screen_size, battery_capacity, ram_options,
                       main_camera_mp, chipset, antutu_score,
-                      release_date                          -- ← full date
+                      release_year, release_month, release_day,
+                      release_date_full
                FROM   phones
-               WHERE  release_date IS NOT NULL
-               ORDER  BY release_date DESC
+               WHERE  release_date_full IS NOT NULL
+               ORDER  BY TO_DATE(regexp_replace(release_date_full, '^Released ', ''),
+                                 'YYYY, Month DD') DESC
                LIMIT  %s""",
             (limit,)
         )
