@@ -690,49 +690,99 @@ def get_phone_stats(phone_id: int):
 
 @app.get("/phones/recommend")
 def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: int = 50):
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        where = ["price_usd IS NOT NULL"]
-        if max_price:
-            where.append(f"price_usd <= {max_price}")
+    """Get phone recommendations with caching and error handling"""
+    try:
+        # Check cache first
+        cache_key = f"{use_case}_{max_price}_{limit}"
+        if cache_key in RECOMMENDATION_CACHE:
+            cached_data, cached_time = RECOMMENDATION_CACHE[cache_key]
+            if datetime.now() - cached_time < CACHE_DURATION_SHORT:
+                return cached_data
         
-        order_map = {
-            "gamer": "COALESCE(antutu_score, 0) * 0.5 + COALESCE(battery_capacity, 0) * 0.015 DESC",
-            "photographer": "COALESCE(main_camera_mp, 0) * 2 + COALESCE(battery_capacity, 0) * 0.01 DESC",
-            "budget": "price_usd ASC",
-            "flagship": "COALESCE(antutu_score, 0) * 0.4 + COALESCE(main_camera_mp, 0) * 3000 DESC",
-            "battery": "battery_capacity DESC",
-        }
-        
-        order_by = order_map.get(use_case.lower(), "release_year DESC")
-        where_clause = " AND ".join(where)
-        
-        cursor.execute(f"""SELECT id, model_name, brand, price_usd, main_image_url, screen_size, battery_capacity,
-                   ram_options, main_camera_mp, chipset, antutu_score
-            FROM phones WHERE {where_clause} ORDER BY {order_by} LIMIT {limit}""")
-        return {"use_case": use_case, "recommendations": cursor.fetchall()}
+        # Build safe query
+        with get_phones_db() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            conditions = ["price_usd IS NOT NULL"]
+            params = []
+            
+            if max_price:
+                conditions.append("price_usd <= %s")
+                params.append(max_price)
+            
+            order_map = {
+                "gamer": "COALESCE(antutu_score, 0) * 0.5 + COALESCE(battery_capacity, 0) * 0.015 DESC",
+                "photographer": "COALESCE(main_camera_mp, 0) * 2 + COALESCE(battery_capacity, 0) * 0.01 DESC",
+                "budget": "price_usd ASC",
+                "flagship": "COALESCE(antutu_score, 0) * 0.4 + COALESCE(main_camera_mp, 0) * 3000 DESC",
+                "battery": "battery_capacity DESC",
+            }
+            
+            order_by = order_map.get(use_case.lower(), "release_year DESC")
+            where_clause = " AND ".join(conditions)
+            
+            sql = f"""
+                SELECT id, model_name, brand, price_usd, main_image_url, screen_size, 
+                       battery_capacity, ram_options, main_camera_mp, chipset, antutu_score
+                FROM phones 
+                WHERE {where_clause} 
+                ORDER BY {order_by} 
+                LIMIT %s
+            """
+            
+            params.append(limit)
+            cursor.execute(sql, params)
+            results = cursor.fetchall()
+            
+            response = {"use_case": use_case, "recommendations": results}
+            
+            # Cache the results
+            RECOMMENDATION_CACHE[cache_key] = (response, datetime.now())
+            
+            return response
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recommendation error: {str(e)}")
 
 @app.get("/phones/latest")
 def get_latest_phones(limit: int = 50):
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(
-            """SELECT id, model_name, brand, price_usd, main_image_url,
-                      screen_size, battery_capacity, ram_options,
-                      main_camera_mp, chipset, antutu_score,
-                      release_year, release_month, release_day,
-                      release_date_full
-               FROM   phones
-               WHERE  release_year IS NOT NULL
-                 AND  release_month IS NOT NULL
-                 AND  release_day IS NOT NULL
-               ORDER  BY release_year DESC,
-                         release_month DESC,
-                         release_day DESC
-               LIMIT  %s""",
-            (limit,)
-        )
-        return {"phones": cursor.fetchall()}
+    """Get latest phones with caching and error handling"""
+    try:
+        # Check cache first
+        if "latest" in LATEST_CACHE:
+            cached_data, cached_time = LATEST_CACHE["latest"]
+            if datetime.now() - cached_time < CACHE_DURATION_SHORT:
+                return cached_data
+        
+        with get_phones_db() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                """SELECT id, model_name, brand, price_usd, main_image_url,
+                          screen_size, battery_capacity, ram_options,
+                          main_camera_mp, chipset, antutu_score,
+                          release_year, release_month, release_day,
+                          release_date_full
+                   FROM phones
+                   WHERE release_year IS NOT NULL
+                     AND release_month IS NOT NULL
+                     AND release_day IS NOT NULL
+                   ORDER BY release_year DESC,
+                            release_month DESC,
+                            release_day DESC
+                   LIMIT %s""",
+                (limit,)
+            )
+            results = cursor.fetchall()
+            
+            response = {"phones": results}
+            
+            # Cache the results
+            LATEST_CACHE["latest"] = (response, datetime.now())
+            
+            return response
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Latest phones error: {str(e)}")
+
 
 @app.get("/phones/{phone_id}", response_model=PhoneDetail)
 def get_phone_details(phone_id: int):
