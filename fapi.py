@@ -333,6 +333,29 @@ def create_review(review: ReviewCreate, user_id: str = Depends(verify_token)):
         except psycopg2.IntegrityError:
             raise HTTPException(status_code=400, detail="Already reviewed this phone")
 
+@app.put("/reviews/{review_id}")
+def update_review(review_id: str, data: dict, user_id: str = Depends(verify_token)):
+    with get_users_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Verify ownership
+        cursor.execute("SELECT user_id FROM reviews WHERE id = %s", (review_id,))
+        review = cursor.fetchone()
+        
+        if not review or review["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        cursor.execute(
+            """UPDATE reviews 
+               SET rating = %s, title = %s, body = %s, verified_owner = %s, updated_at = NOW()
+               WHERE id = %s
+               RETURNING id, updated_at""",
+            (data["rating"], data["title"], data["body"], data.get("verified_owner", False), review_id)
+        )
+        result = cursor.fetchone()
+        conn.commit()
+        return {"success": True, "review": result}
+
 @app.get("/reviews/phone/{phone_id}")
 def get_phone_reviews(phone_id: int, page: int = 1, page_size: int = 10):
     with get_users_db() as conn:
