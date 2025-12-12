@@ -89,6 +89,7 @@ PHONE_CACHE = {}
 PHONE_STATS_CACHE = {}
 CACHE_DURATION = timedelta(hours=6)  # Cache for 6 hours
 LATEST_CACHE = {}  # Cache for latest phones endpoint
+RECOMMENDATION_CACHE = {}
 CACHE_DURATION_SHORT = timedelta(minutes=15)  # Shorter TTL for frequently changing data
 
 def get_phone_cached(phone_id: int):
