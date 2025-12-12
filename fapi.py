@@ -92,12 +92,18 @@ LATEST_CACHE = {}  # Cache for latest phones endpoint
 RECOMMENDATION_CACHE = {}
 CACHE_DURATION_SHORT = timedelta(minutes=15)  # Shorter TTL for frequently changing data
 
+
 def get_phone_cached(phone_id: int):
     """Get phone with caching - 90% faster for repeated requests"""
     if phone_id in PHONE_CACHE:
         cached_data, cached_time = PHONE_CACHE[phone_id]
         if datetime.now() - cached_time < CACHE_DURATION:
             return cached_data
+    
+    # ✅ Limit cache size to prevent memory issues
+    if len(PHONE_CACHE) > 1000:
+        oldest = min(PHONE_CACHE.items(), key=lambda x: x[1][1])
+        PHONE_CACHE.pop(oldest[0])
     
     with get_phones_db() as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -201,6 +207,8 @@ def expand_search_query(q: str) -> str:
         if q_lower.startswith(short) and not q_lower.startswith(full):
             return full + q_lower[len(short):]
     return q
+
+
 
 app = FastAPI(
     title="Mobylite API - Optimized",
