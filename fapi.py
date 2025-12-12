@@ -676,19 +676,6 @@ def search_phones(
 
         return {"total": total, "page": page, "page_size": page_size, "results": results}
 
-# ✅ PHONE ENDPOINTS (with caching)
-@app.get("/phones/{phone_id}", response_model=PhoneDetail)
-def get_phone_details(phone_id: int):
-    phone = get_phone_cached(phone_id)
-    if not phone:
-        raise HTTPException(status_code=404, detail="Phone not found")
-    return phone
-
-@app.get("/phones/{phone_id}/stats")
-def get_phone_stats(phone_id: int):
-    stats = get_phone_stats_cached(phone_id)
-    return {"success": True, "stats": stats}
-
 
 @app.get("/phones/recommend")
 def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: int = 50):
@@ -787,29 +774,6 @@ def get_latest_phones(limit: int = 50):
         raise HTTPException(status_code=500, detail=f"Latest phones error: {str(e)}")
 
 
-@app.get("/phones/{phone_id}", response_model=PhoneDetail)
-def get_phone_details(phone_id: int):
-    """Get phone details with caching (90% faster on repeat requests)"""
-    phone = get_phone_cached(phone_id)
-    if not phone:
-        raise HTTPException(status_code=404, detail="Phone not found")
-    return phone
-
-@app.get("/phones/{phone_id}/stats")
-def get_phone_stats(phone_id: int):
-    """
-    Get comprehensive statistics for a phone:
-    - Average rating from reviews
-    - Total reviews count
-    - Total favorites count
-    - Rating distribution (1-5 stars)
-    - Verified owner percentage
-    ✅ Uses cached stats for 30-minute performance boost
-    """
-    stats = get_phone_stats_cached(phone_id)
-    return {"success": True, "stats": stats}
-
-
 @app.get("/filters/stats", response_model=FilterStats)
 def get_filter_stats():
     """Get filter statistics for phone browsing"""
@@ -859,6 +823,18 @@ def get_filter_stats():
         raise HTTPException(status_code=500, detail=f"Filter stats error: {str(e)}")
 
 
+# ✅ PHONE ENDPOINTS (with caching)
+@app.get("/phones/{phone_id}", response_model=PhoneDetail)
+def get_phone_details(phone_id: int):
+    phone = get_phone_cached(phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Phone not found")
+    return phone
+
+@app.get("/phones/{phone_id}/stats")
+def get_phone_stats(phone_id: int):
+    stats = get_phone_stats_cached(phone_id)
+    return {"success": True, "stats": stats}
 
 if __name__ == "__main__":
     import uvicorn
