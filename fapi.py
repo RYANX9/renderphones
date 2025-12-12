@@ -743,93 +743,61 @@ def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: in
 
 @app.get("/phones/latest")
 def get_latest_phones(limit: int = 50):
-    """Get latest phones with caching and error handling"""
-    try:
-        # ✅ Check cache first
-        cache_key = "latest"
-        if cache_key in LATEST_CACHE:
-            cached_data, cached_time = LATEST_CACHE[cache_key]
-            if datetime.now() - cached_time < CACHE_DURATION_SHORT:
-                return cached_data
-        
-        with get_phones_db() as conn:
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(
-                """SELECT id, model_name, brand, price_usd, main_image_url,
-                          screen_size, battery_capacity, ram_options,
-                          main_camera_mp, chipset, antutu_score,
-                          release_year, release_month, release_day,
-                          release_date_full
-                   FROM phones
-                   WHERE release_year IS NOT NULL
-                     AND release_month IS NOT NULL
-                     AND release_day IS NOT NULL
-                   ORDER BY release_year DESC,
-                            release_month DESC,
-                            release_day DESC
-                   LIMIT %s""",
-                (limit,)
-            )
-            results = cursor.fetchall()
-            
-            response = {"success": True, "phones": results}
-            
-            # ✅ Cache the results
-            LATEST_CACHE[cache_key] = (response, datetime.now())
-            
-            return response
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Latest phones error: {str(e)}")
-
+    with get_phones_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """SELECT id, model_name, brand, price_usd, main_image_url,
+                   screen_size, battery_capacity, ram_options,
+                   main_camera_mp, chipset, antutu_score,
+                   release_year, release_month, release_day,
+                   release_date_full
+            FROM   phones
+            WHERE  release_year IS NOT NULL
+            AND    release_month IS NOT NULL
+            AND    release_day IS NOT NULL
+            ORDER  BY release_year DESC,
+                      release_month DESC,
+                      release_day DESC
+            LIMIT  %s""",
+            (limit,)
+        )
+        return {"phones": cursor.fetchall()}
 
 @app.get("/filters/stats", response_model=FilterStats)
 def get_filter_stats():
-    """Get filter statistics for phone browsing"""
-    try:
-        with get_phones_db() as conn:
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            # Get total phones count
-            cursor.execute("SELECT COUNT(*) AS total_phones FROM phones")
-            total_phones = cursor.fetchone()["total_phones"]
-            
-            # Get total brands count
-            cursor.execute("SELECT COUNT(DISTINCT brand) AS total_brands FROM phones WHERE brand IS NOT NULL")
-            total_brands = cursor.fetchone()["total_brands"]
-            
-            # Get brands with counts
-            cursor.execute("SELECT brand, COUNT(*) AS count FROM phones WHERE brand IS NOT NULL GROUP BY brand ORDER BY count DESC")
-            brands = cursor.fetchall()
-            
-            # Get price range
-            cursor.execute("SELECT MIN(price_usd) AS min_price, MAX(price_usd) AS max_price FROM phones WHERE price_usd IS NOT NULL")
-            price_range = cursor.fetchone()
-            
-            # Get RAM options
-            cursor.execute("SELECT DISTINCT unnest(ram_options) AS ram FROM phones WHERE ram_options IS NOT NULL ORDER BY ram")
-            ram_options = [r["ram"] for r in cursor.fetchall()]
-            
-            # Get battery range
-            cursor.execute("SELECT MIN(battery_capacity) AS min_battery, MAX(battery_capacity) AS max_battery FROM phones WHERE battery_capacity IS NOT NULL")
-            battery_range = cursor.fetchone()
-            
-            # Get release years
-            cursor.execute("SELECT DISTINCT release_year FROM phones WHERE release_year IS NOT NULL ORDER BY release_year DESC")
-            release_years = [r["release_year"] for r in cursor.fetchall()]
-            
-            return {
-                "success": True,
-                "total_phones": total_phones, 
-                "total_brands": total_brands, 
-                "brands": brands,
-                "price_range": price_range, 
-                "ram_options": ram_options,
-                "battery_range": battery_range, 
-                "release_years": release_years,
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Filter stats error: {str(e)}")
+    with get_phones_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("SELECT COUNT(*) AS total_phones FROM phones")
+        total_phones = cursor.fetchone()["total_phones"]
+        
+        cursor.execute("SELECT COUNT(DISTINCT brand) AS total_brands FROM phones WHERE brand IS NOT NULL")
+        total_brands = cursor.fetchone()["total_brands"]
+        
+        cursor.execute("SELECT brand, COUNT(*) AS count FROM phones WHERE brand IS NOT NULL GROUP BY brand ORDER BY count DESC")
+        brands = cursor.fetchall()
+        
+        cursor.execute("SELECT MIN(price_usd) AS min_price, MAX(price_usd) AS max_price FROM phones WHERE price_usd IS NOT NULL")
+        price_range = cursor.fetchone()
+        
+        cursor.execute("SELECT DISTINCT unnest(ram_options) AS ram FROM phones WHERE ram_options IS NOT NULL ORDER BY ram")
+        ram_options = [r["ram"] for r in cursor.fetchall()]
+        
+        cursor.execute("SELECT MIN(battery_capacity) AS min_battery, MAX(battery_capacity) AS max_battery FROM phones WHERE battery_capacity IS NOT NULL")
+        battery_range = cursor.fetchone()
+        
+        cursor.execute("SELECT DISTINCT release_year FROM phones WHERE release_year IS NOT NULL ORDER BY release_year DESC")
+        release_years = [r["release_year"] for r in cursor.fetchall()]
+        
+        return {
+            "total_phones": total_phones, 
+            "total_brands": total_brands, 
+            "brands": brands,
+            "price_range": price_range, 
+            "ram_options": ram_options,
+            "battery_range": battery_range, 
+            "release_years": release_years,
+        }
 
 
 # ✅ PHONE ENDPOINTS (with caching)
@@ -844,6 +812,7 @@ def get_phone_details(phone_id: int):
 def get_phone_stats(phone_id: int):
     stats = get_phone_stats_cached(phone_id)
     return {"success": True, "stats": stats}
+    
 
 if __name__ == "__main__":
     import uvicorn
