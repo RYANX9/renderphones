@@ -551,15 +551,16 @@ def update_review(review_id: str, data: UpdateReviewData, user_id: str = Depends
         return {"success": True, "review": dict(updated_review)}
         
 @app.get("/reviews/phone/{phone_id}")
-def get_phone_reviews(phone_id: int, page: int = 1, page_size: int = 10):
-    with get_users_db() as conn:
+def get_phone_reviews(phone_id: int, page: int = 1, page_size: int = 10, user_id: Optional[str] = Depends(verify_token, None)):
+    with get_users_db(user_id if user_id else None) as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         offset = (page - 1) * page_size
+        
         cursor.execute(
-            """SELECT r.*, u.display_name, u.avatar_url 
-               FROM reviews r 
-               JOIN users u ON r.user_id = u.id 
-               WHERE r.phone_id = %s AND r.is_visible = TRUE 
+            """SELECT r.*, u.display_name, u.avatar_url
+               FROM reviews r
+               JOIN users u ON r.user_id = u.id
+               WHERE r.phone_id = %s AND r.is_visible = TRUE
                ORDER BY r.created_at DESC LIMIT %s OFFSET %s""",
             (phone_id, page_size, offset)
         )
@@ -570,8 +571,22 @@ def get_phone_reviews(phone_id: int, page: int = 1, page_size: int = 10):
         
         cursor.execute("SELECT AVG(rating) as avg_rating FROM reviews WHERE phone_id = %s AND is_visible = TRUE", (phone_id,))
         avg_rating = cursor.fetchone()["avg_rating"] or 0
+        
+        helpful_review_ids = []
+        if user_id:
+            cursor.execute(
+                "SELECT review_id FROM review_votes WHERE user_id = %s AND review_id IN (SELECT id FROM reviews WHERE phone_id = %s)",
+                (user_id, phone_id)
+            )
+            helpful_review_ids = [row["review_id"] for row in cursor.fetchall()]
     
-    return {"success": True, "total": total, "avg_rating": float(avg_rating), "reviews": reviews}
+    return {
+        "success": True,
+        "total": total,
+        "avg_rating": float(avg_rating),
+        "reviews": reviews,
+        "helpful_review_ids": helpful_review_ids  # Only included if authenticated
+    }
 
 @app.get("/reviews/user")
 def get_user_reviews(user_id: str = Depends(verify_token)):
