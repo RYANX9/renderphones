@@ -127,6 +127,7 @@ def get_phone_stats_cached(phone_id: int):
     return stats
 
 def calculate_phone_stats(phone_id: int):
+    """Calculate phone statistics"""
     stats = {
         "average_rating": 0,
         "total_reviews": 0,
@@ -183,6 +184,7 @@ def calculate_phone_stats(phone_id: int):
             stats["total_favorites"] = fav_data["total_favorites"]
     
     return stats
+
 
 def invalidate_phone_cache(phone_id: int):
     """Invalidate cache when data changes"""
@@ -315,6 +317,13 @@ class ReviewCreate(BaseModel):
     body: str
     pros: Optional[List[str]] = []
     cons: Optional[List[str]] = []
+    is_owner: Optional[bool] = False
+
+class UpdateReviewData(BaseModel):
+    rating: Optional[float] = Field(None, ge=0, le=5)
+    title: Optional[str] = None
+    body: Optional[str] = None
+    is_owner: Optional[bool] = None
 
 class PriceAlertCreate(BaseModel):
     phone_id: int
@@ -479,17 +488,63 @@ def create_review(review: ReviewCreate, user_id: str = Depends(verify_token)):
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute(
-                """INSERT INTO reviews (user_id, phone_id, rating, title, body, pros, cons) 
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at""",
-                (user_id, review.phone_id, review.rating, review.title, review.body, review.pros, review.cons)
+                """INSERT INTO reviews (user_id, phone_id, rating, title, body, pros, cons, is_owner) 
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at""",
+                (user_id, review.phone_id, review.rating, review.title, review.body, 
+                 review.pros, review.cons, review.is_owner)
             )
             result = cursor.fetchone()
             conn.commit()
-            invalidate_phone_cache(review.phone_id)  # Invalidate stats cache
+            invalidate_phone_cache(review.phone_id)
             return {"success": True, "review": result}
         except psycopg2.IntegrityError:
             raise HTTPException(status_code=400, detail="Already reviewed this phone")
 
+
+@app.put("/reviews/{review_id}")
+def update_review(review_id: str, data: UpdateReviewData, user_id: str = Depends(verify_token)):
+    with get_users_db(user_id) as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("SELECT user_id, phone_id FROM reviews WHERE id = %s", (review_id,))
+        review = cursor.fetchone()
+        
+        if not review:
+            raise HTTPException(status_code=404, detail="Review not found")
+        if str(review["user_id"]) != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        update_fields = []
+        params = []
+        
+        if data.rating is not None:
+            update_fields.append("rating = %s")
+            params.append(data.rating)
+        if data.title is not None:
+            update_fields.append("title = %s")
+            params.append(data.title)
+        if data.body is not None:
+            update_fields.append("body = %s")
+            params.append(data.body)
+        if data.is_owner is not None:
+            update_fields.append("is_owner = %s")
+            params.append(data.is_owner)
+        
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        update_fields.append("edited_at = NOW()")
+        params.append(review_id)
+        
+        sql = f"UPDATE reviews SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
+        cursor.execute(sql, params)
+        updated_review = cursor.fetchone()
+        conn.commit()
+        
+        invalidate_phone_cache(review["phone_id"])
+        
+        return {"success": True, "review": dict(updated_review)}
+        
 @app.get("/reviews/phone/{phone_id}")
 def get_phone_reviews(phone_id: int, page: int = 1, page_size: int = 10):
     with get_users_db() as conn:
@@ -520,52 +575,7 @@ def get_user_reviews(user_id: str = Depends(verify_token)):
         cursor.execute("SELECT * FROM reviews WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
         return {"reviews": cursor.fetchall()}
         
-@app.put("/reviews/{review_id}")
-def update_review(review_id: str, data: UpdateReviewData, credentials: HTTPAuthorizationCredentials = Depends(security)):
-    user_id = validate_token(credentials.credentials)
-    
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("SELECT user_id, phone_id FROM reviews WHERE id = %s", (review_id,))
-        review = cursor.fetchone()
-        
-        if not review:
-            raise HTTPException(status_code=404, detail="Review not found")
-        if review["user_id"] != user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
-        
-        update_fields = []
-        params = []
-        
-        if data.rating is not None:
-            update_fields.append("rating = %s")
-            params.append(data.rating)
-        if data.title is not None:
-            update_fields.append("title = %s")
-            params.append(data.title)
-        if data.body is not None:
-            update_fields.append("body = %s")
-            params.append(data.body)
-        if data.is_owner is not None:
-            update_fields.append("is_owner = %s")
-            params.append(data.is_owner)
-        
-        if not update_fields:
-            raise HTTPException(status_code=400, detail="No fields to update")
-        
-        update_fields.append("edited_at = NOW()")
-        params.extend([review_id])
-        
-        sql = f"UPDATE reviews SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
-        cursor.execute(sql, params)
-        updated_review = cursor.fetchone()
-        conn.commit()
-        
-        invalidate_phone_cache(review["phone_id"])
-        
-        return {"success": True, "review": dict(updated_review)}
-        
+
 @app.post("/reviews/{review_id}/helpful")
 def mark_review_helpful(review_id: str, user_id: str = Depends(verify_token)):
     with get_users_db() as conn:
