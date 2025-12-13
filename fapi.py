@@ -226,10 +226,15 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://mobylite.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:3001"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # ✅ STARTUP EVENT: Initialize connection pools
@@ -861,6 +866,15 @@ def get_filter_stats():
             "release_years": release_years,
         }
 
+@app.get("/phones/{phone_id}/also-compared")
+def get_also_compared(phone_id: int):
+    # Return empty array for now
+    return {"phones": []}
+
+@app.post("/history/views")
+def record_view(data: dict):
+    # Accept but don't process for now
+    return {"success": True}
 
 # ✅ PHONE ENDPOINTS (with caching)
 @app.get("/phones/{phone_id}", response_model=PhoneDetail)
