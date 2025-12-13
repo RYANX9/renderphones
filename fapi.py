@@ -127,11 +127,11 @@ def get_phone_stats_cached(phone_id: int):
     return stats
 
 def calculate_phone_stats(phone_id: int):
-    """Calculate phone statistics"""
     stats = {
         "average_rating": 0,
         "total_reviews": 0,
         "total_favorites": 0,
+        "total_owners": 0,
         "rating_distribution": {"5": 0, "4": 0, "3": 0, "2": 0, "1": 0},
         "verified_owners_percentage": 0
     }
@@ -143,7 +143,8 @@ def calculate_phone_stats(phone_id: int):
             """SELECT 
                 COUNT(*) as total_reviews,
                 COALESCE(AVG(rating), 0) as avg_rating,
-                COUNT(CASE WHEN verified_owner = TRUE THEN 1 END) as verified_count
+                COUNT(CASE WHEN verified_owner = TRUE THEN 1 END) as verified_count,
+                COUNT(CASE WHEN is_owner = TRUE THEN 1 END) as owner_count
                FROM reviews 
                WHERE phone_id = %s AND is_visible = TRUE""",
             (phone_id,)
@@ -153,6 +154,7 @@ def calculate_phone_stats(phone_id: int):
         if review_data:
             stats["total_reviews"] = review_data["total_reviews"]
             stats["average_rating"] = float(review_data["avg_rating"])
+            stats["total_owners"] = review_data["owner_count"]
             
             if stats["total_reviews"] > 0:
                 stats["verified_owners_percentage"] = round(
@@ -208,7 +210,11 @@ def expand_search_query(q: str) -> str:
             return full + q_lower[len(short):]
     return q
 
-
+class UpdateReviewData(BaseModel):
+    rating: Optional[float] = None
+    title: Optional[str] = None
+    body: Optional[str] = None
+    is_owner: Optional[bool] = None
 
 app = FastAPI(
     title="Mobylite API - Optimized",
@@ -513,7 +519,53 @@ def get_user_reviews(user_id: str = Depends(verify_token)):
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SELECT * FROM reviews WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
         return {"reviews": cursor.fetchall()}
-
+        
+@app.put("/reviews/{review_id}")
+def update_review(review_id: str, data: UpdateReviewData, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    user_id = validate_token(credentials.credentials)
+    
+    with get_users_db(user_id) as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("SELECT user_id, phone_id FROM reviews WHERE id = %s", (review_id,))
+        review = cursor.fetchone()
+        
+        if not review:
+            raise HTTPException(status_code=404, detail="Review not found")
+        if review["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        update_fields = []
+        params = []
+        
+        if data.rating is not None:
+            update_fields.append("rating = %s")
+            params.append(data.rating)
+        if data.title is not None:
+            update_fields.append("title = %s")
+            params.append(data.title)
+        if data.body is not None:
+            update_fields.append("body = %s")
+            params.append(data.body)
+        if data.is_owner is not None:
+            update_fields.append("is_owner = %s")
+            params.append(data.is_owner)
+        
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        update_fields.append("edited_at = NOW()")
+        params.extend([review_id])
+        
+        sql = f"UPDATE reviews SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
+        cursor.execute(sql, params)
+        updated_review = cursor.fetchone()
+        conn.commit()
+        
+        invalidate_phone_cache(review["phone_id"])
+        
+        return {"success": True, "review": dict(updated_review)}
+        
 @app.post("/reviews/{review_id}/helpful")
 def mark_review_helpful(review_id: str, user_id: str = Depends(verify_token)):
     with get_users_db() as conn:
