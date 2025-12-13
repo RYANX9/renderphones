@@ -20,6 +20,10 @@ import secrets
 import hashlib
 import uuid
 from functools import lru_cache
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+import os
+
 
 # ✅ DATABASE CONFIG
 DB_CONFIG_PHONES = {
@@ -446,14 +450,12 @@ class GoogleAuthRequest(BaseModel):
 @app.post("/auth/google")
 async def google_oauth(data: GoogleAuthRequest):
     try:
-        # Verify the Google token
         idinfo = id_token.verify_oauth2_token(
             data.credential,
-            requests.Request(),
+            google_requests.Request(),
             os.getenv("GOOGLE_CLIENT_ID")
         )
         
-        # Get user info from Google
         email = idinfo['email']
         google_id = idinfo['sub']
         display_name = idinfo.get('name', email.split('@')[0])
@@ -462,7 +464,6 @@ async def google_oauth(data: GoogleAuthRequest):
         with get_users_db() as conn:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             
-            # Check if user exists by google_id or email
             cursor.execute(
                 "SELECT * FROM users WHERE google_id = %s OR email = %s",
                 (google_id, email)
@@ -470,7 +471,6 @@ async def google_oauth(data: GoogleAuthRequest):
             user = cursor.fetchone()
             
             if user:
-                # Update google_id if not set
                 if not user['google_id']:
                     cursor.execute(
                         "UPDATE users SET google_id = %s, avatar_url = %s WHERE id = %s",
@@ -478,21 +478,18 @@ async def google_oauth(data: GoogleAuthRequest):
                     )
                     conn.commit()
             else:
-                # Create new user
                 cursor.execute(
-                    """INSERT INTO users (email, google_id, display_name, avatar_url, email_verified)
-                       VALUES (%s, %s, %s, %s, TRUE)
+                    """INSERT INTO users (email, google_id, display_name, avatar_url, email_verified, password_hash)
+                       VALUES (%s, %s, %s, %s, TRUE, '')
                        RETURNING id, email, display_name, avatar_url""",
                     (email, google_id, display_name, avatar_url)
                 )
                 user = cursor.fetchone()
                 conn.commit()
             
-            # Generate JWT token
-            token = generate_token(str(user['id']))
+            token = create_token(str(user['id']))
             
             return {
-                "success": True,
                 "token": token,
                 "user": {
                     "id": str(user['id']),
@@ -506,7 +503,7 @@ async def google_oauth(data: GoogleAuthRequest):
         raise HTTPException(status_code=401, detail="Invalid Google token")
     except Exception as e:
         print(f"Google OAuth error: {e}")
-        raise HTTPException(status_code=500, detail="Authentication failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ✅ FAVORITES ENDPOINTS
 @app.post("/favorites")
