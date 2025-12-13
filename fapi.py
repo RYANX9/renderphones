@@ -438,6 +438,76 @@ def get_current_user(user_id: str = Depends(verify_token)):
             raise HTTPException(status_code=404, detail="User not found")
         return {"success": True, "user": dict(user)}
 
+# Add this model
+class GoogleAuthRequest(BaseModel):
+    credential: str
+
+# Add this endpoint
+@app.post("/auth/google")
+async def google_oauth(data: GoogleAuthRequest):
+    try:
+        # Verify the Google token
+        idinfo = id_token.verify_oauth2_token(
+            data.credential,
+            requests.Request(),
+            os.getenv("GOOGLE_CLIENT_ID")
+        )
+        
+        # Get user info from Google
+        email = idinfo['email']
+        google_id = idinfo['sub']
+        display_name = idinfo.get('name', email.split('@')[0])
+        avatar_url = idinfo.get('picture')
+        
+        with get_users_db() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Check if user exists by google_id or email
+            cursor.execute(
+                "SELECT * FROM users WHERE google_id = %s OR email = %s",
+                (google_id, email)
+            )
+            user = cursor.fetchone()
+            
+            if user:
+                # Update google_id if not set
+                if not user['google_id']:
+                    cursor.execute(
+                        "UPDATE users SET google_id = %s, avatar_url = %s WHERE id = %s",
+                        (google_id, avatar_url, user['id'])
+                    )
+                    conn.commit()
+            else:
+                # Create new user
+                cursor.execute(
+                    """INSERT INTO users (email, google_id, display_name, avatar_url, email_verified)
+                       VALUES (%s, %s, %s, %s, TRUE)
+                       RETURNING id, email, display_name, avatar_url""",
+                    (email, google_id, display_name, avatar_url)
+                )
+                user = cursor.fetchone()
+                conn.commit()
+            
+            # Generate JWT token
+            token = generate_token(str(user['id']))
+            
+            return {
+                "success": True,
+                "token": token,
+                "user": {
+                    "id": str(user['id']),
+                    "email": user['email'],
+                    "display_name": user['display_name'],
+                    "avatar_url": user.get('avatar_url')
+                }
+            }
+            
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail="Invalid Google token")
+    except Exception as e:
+        print(f"Google OAuth error: {e}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
+
 # ✅ FAVORITES ENDPOINTS
 @app.post("/favorites")
 def add_favorite(data: FavoriteCreate, user_id: str = Depends(verify_token)):
