@@ -27,6 +27,9 @@ import requests
 
 
 # ✅ DATABASE CONFIG
+from google.auth.transport import requests as google_requests
+
+# ✅ DATABASE CONFIG - ADDED KEEPALIVES TO FIX SSL ERROR
 DB_CONFIG_PHONES = {
     "host": "ep-twilight-brook-agshqx5x-pooler.c-2.eu-central-1.aws.neon.tech",
     "port": 5432,
@@ -34,6 +37,10 @@ DB_CONFIG_PHONES = {
     "user": "neondb_owner",
     "password": "npg_iuklm3PF4Itw",
     "sslmode": "require",
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 5,
 }
 
 DB_CONFIG_USERS = {
@@ -43,6 +50,10 @@ DB_CONFIG_USERS = {
     "user": "neondb_owner",
     "password": "npg_c6nFi5XeBjIY",
     "sslmode": "require",
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 5,
 }
 
 TOKEN_EXPIRATION_HOURS = 24 * 7
