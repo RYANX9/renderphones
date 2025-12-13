@@ -598,24 +598,21 @@ def get_user_reviews(user_id: str = Depends(verify_token)):
 
 @app.post("/reviews/{review_id}/helpful")
 def mark_review_helpful(review_id: str, user_id: str = Depends(verify_token)):
-    with get_users_db() as conn:
+    with get_users_db(user_id) as conn:  # ✅ FIXED - pass user_id
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Check if already voted
         cursor.execute(
-            "SELECT 1 FROM review_votes WHERE review_id = %s AND user_id = %s",
+            "SELECT 1 FROM helpful_votes WHERE review_id = %s AND user_id = %s",
             (review_id, user_id)
         )
         if cursor.fetchone():
             return {"success": False, "message": "Already voted"}
         
-        # Add vote
         cursor.execute(
-            "INSERT INTO review_votes (review_id, user_id) VALUES (%s, %s)",
+            "INSERT INTO helpful_votes (review_id, user_id) VALUES (%s, %s)",
             (review_id, user_id)
         )
         
-        # Increment helpful count
         cursor.execute(
             "UPDATE reviews SET helpful_count = helpful_count + 1 WHERE id = %s RETURNING phone_id",
             (review_id,)
