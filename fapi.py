@@ -980,7 +980,34 @@ def get_also_compared(phone_id: int):
 def record_view(data: dict):
     # Accept but don't process for now
     return {"success": True}
+
+@app.get("/sitemap.xml")
+def generate_sitemap():
+    """Generate dynamic sitemap for all phones"""
+    with get_phones_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT brand, model_name, updated_at FROM phones")
+        phones = cursor.fetchall()
     
+    sitemap = ['<?xml version="1.0" encoding="UTF-8"?>']
+    sitemap.append('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+    
+    for phone in phones:
+        brand_slug = phone['brand'].lower().replace(' ', '-')
+        model_slug = createPhoneSlug({'brand': phone['brand'], 'model_name': phone['model_name']})
+        
+        sitemap.append(f'''
+        <url>
+            <loc>https://mobylite.vercel.app/{brand_slug}/{model_slug}</loc>
+            <lastmod>{phone['updated_at'].strftime('%Y-%m-%d')}</lastmod>
+            <priority>0.8</priority>
+        </url>
+        ''')
+    
+    sitemap.append('</urlset>')
+    
+    return Response(content=''.join(sitemap), media_type="application/xml")
+
 @app.get("/phones/compare-by-slug/{slugs}")
 def compare_phones_by_slug(slugs: str):
     """
