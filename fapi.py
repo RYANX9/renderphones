@@ -980,7 +980,58 @@ def get_also_compared(phone_id: int):
 def record_view(data: dict):
     # Accept but don't process for now
     return {"success": True}
-
+    
+@app.get("/phones/compare-by-slug/{slugs}")
+def compare_phones_by_slug(slugs: str):
+    """
+    Compare phones via URL slugs
+    Example: /phones/compare-by-slug/iphone-15-pro-vs-samsung-s24-ultra-vs-pixel-8-pro
+    """
+    
+    phone_slugs = slugs.split('-vs-')
+    
+    if len(phone_slugs) > 4:
+        raise HTTPException(status_code=400, detail="Max 4 phones allowed")
+    
+    if len(phone_slugs) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 phones required")
+    
+    phones = []
+    
+    with get_phones_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        for slug in phone_slugs:
+            normalized = slug.replace('-', ' ').lower()
+            
+            cursor.execute(
+                """SELECT * FROM phones 
+                   WHERE LOWER(REPLACE(model_name, ' ', '-')) LIKE %s
+                   ORDER BY release_year DESC NULLS LAST
+                   LIMIT 1""",
+                (f"%{slug}%",)
+            )
+            
+            phone = cursor.fetchone()
+            
+            if not phone:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Phone not found: {slug}"
+                )
+            
+            phones.append(dict(phone))
+    
+    # Get stats for all phones
+    for phone in phones:
+        phone['stats'] = get_phone_stats_cached(phone['id'])
+    
+    return {
+        "success": True,
+        "phones": phones,
+        "comparison_count": len(phones)
+    }
+    
 # ✅ PHONE ENDPOINTS (with caching)
 @app.get("/phones/{phone_id}", response_model=PhoneDetail)
 def get_phone_details(phone_id: int):
@@ -989,6 +1040,58 @@ def get_phone_details(phone_id: int):
         raise HTTPException(status_code=404, detail="Phone not found")
     return phone
 
+@app.get("/phones/slug/{brand}/{model}")
+def get_phone_by_slug(brand: str, model: str):
+    """Get phone by SEO-friendly URL slug"""
+    
+    # Normalize the model name from URL
+    model_normalized = model.replace('-', ' ').lower()
+    brand_normalized = brand.replace('-', ' ').lower()
+    
+    with get_phones_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fuzzy match - handles variations like "iphone-15-pro" vs "iPhone 15 Pro"
+        cursor.execute(
+            """SELECT * FROM phones 
+               WHERE LOWER(REPLACE(model_name, ' ', '-')) = %s 
+               AND LOWER(brand) = %s
+               LIMIT 1""",
+            (model_normalized.replace(' ', '-'), brand_normalized)
+        )
+        
+        phone = cursor.fetchone()
+        
+        if not phone:
+            raise HTTPException(status_code=404, detail="Phone not found")
+        
+        phone_dict = dict(phone)
+        phone_id = phone_dict['id']
+    
+    # Get reviews + stats in single response
+    with get_users_db() as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute(
+            """SELECT r.*, u.display_name, u.avatar_url
+               FROM reviews r
+               JOIN users u ON r.user_id = u.id
+               WHERE r.phone_id = %s AND r.is_visible = TRUE
+               ORDER BY r.helpful_count DESC, r.created_at DESC
+               LIMIT 10""",
+            (phone_id,)
+        )
+        reviews = cursor.fetchall()
+        
+        stats = get_phone_stats_cached(phone_id)
+    
+    return {
+        "success": True,
+        "phone": phone_dict,
+        "reviews": reviews,
+        "stats": stats
+    }
+    
 @app.get("/phones/{phone_id}/stats")
 def get_phone_stats(phone_id: int):
     stats = get_phone_stats_cached(phone_id)
