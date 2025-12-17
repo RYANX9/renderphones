@@ -689,25 +689,28 @@ def get_user_reviews(user_id: str = Depends(verify_token)):
         return {"reviews": cursor.fetchall()}
         
 
-@app.post("/reviews/{review_id}/helpful")
-def mark_review_helpful(review_id: str, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:  # ✅ FIXED - pass user_id
+@app.delete("/reviews/{review_id}/helpful")
+def remove_helpful_vote(review_id: str, user_id: str = Depends(verify_token)):
+    with get_users_db(user_id) as conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
+        # Check if vote exists
         cursor.execute(
             "SELECT 1 FROM helpful_votes WHERE review_id = %s AND user_id = %s",
             (review_id, user_id)
         )
-        if cursor.fetchone():
-            return {"success": False, "message": "Already voted"}
+        if not cursor.fetchone():
+            return {"success": False, "message": "Vote not found"}
         
+        # Delete the vote
         cursor.execute(
-            "INSERT INTO helpful_votes (review_id, user_id) VALUES (%s, %s)",
+            "DELETE FROM helpful_votes WHERE review_id = %s AND user_id = %s",
             (review_id, user_id)
         )
         
+        # Decrement helpful count
         cursor.execute(
-            "UPDATE reviews SET helpful_count = helpful_count + 1 WHERE id = %s RETURNING phone_id",
+            "UPDATE reviews SET helpful_count = GREATEST(helpful_count - 1, 0) WHERE id = %s RETURNING phone_id",
             (review_id,)
         )
         result = cursor.fetchone()
@@ -716,7 +719,7 @@ def mark_review_helpful(review_id: str, user_id: str = Depends(verify_token)):
         if result:
             invalidate_phone_cache(result["phone_id"])
         
-        return {"success": True, "message": "Vote recorded"}
+        return {"success": True, "message": "Vote removed"}
 
 @app.delete("/reviews/{review_id}")
 def delete_review(review_id: str, user_id: str = Depends(verify_token)):
