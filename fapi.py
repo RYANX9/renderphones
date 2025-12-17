@@ -718,6 +718,29 @@ def mark_review_helpful(review_id: str, user_id: str = Depends(verify_token)):
         
         return {"success": True, "message": "Vote recorded"}
 
+@app.delete("/reviews/{review_id}")
+def delete_review(review_id: str, user_id: str = Depends(verify_token)):
+    with get_users_db(user_id) as conn:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if review exists and belongs to user
+        cursor.execute("SELECT user_id, phone_id FROM reviews WHERE id = %s", (review_id,))
+        review = cursor.fetchone()
+        
+        if not review:
+            raise HTTPException(status_code=404, detail="Review not found")
+        if str(review["user_id"]) != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Delete the review
+        cursor.execute("DELETE FROM reviews WHERE id = %s", (review_id,))
+        conn.commit()
+        
+        # Invalidate cache
+        invalidate_phone_cache(review["phone_id"])
+        
+        return {"success": True, "message": "Review deleted"}
+
 # ✅ PRICE ALERTS ENDPOINTS
 @app.post("/price-alerts")
 def create_price_alert(alert: PriceAlertCreate, user_id: str = Depends(verify_token)):
