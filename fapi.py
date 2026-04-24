@@ -1,1154 +1,952 @@
 """
-FastAPI backend for Mobylite Platform - OPTIMIZED VERSION
-- Connection Pooling
-- In-Memory Caching
-- Database Indexes
-- Smart Query Optimization
+Mobylite API — V1
+Phone search, filtering, detail, compare, brand pages, trending, category rankings.
+No auth. No accounts. No user data. Pure phone data.
 """
 
-from fastapi import FastAPI, Query, HTTPException, Depends, status
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field, EmailStr
-from typing import Optional, List
-from contextlib import contextmanager
-from datetime import datetime, timedelta
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
-import secrets
-import hashlib
-import uuid
-from functools import lru_cache
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+from typing import Optional
 import os
-import requests 
+import json
+import asyncpg
+import re
+from datetime import datetime, timedelta
 
+# ─── DB ──────────────────────────────────────────────────────────────────────
 
-# ✅ DATABASE CONFIG
-from google.auth.transport import requests as google_requests
-
-# ✅ DATABASE CONFIG - ADDED KEEPALIVES TO FIX SSL ERROR
-DB_CONFIG_PHONES = {
-    "host": "ep-twilight-brook-agshqx5x-pooler.c-2.eu-central-1.aws.neon.tech",
-    "port": 5432,
-    "dbname": "neondb",
-    "user": "neondb_owner",
-    "password": "npg_iuklm3PF4Itw",
-    "sslmode": "require",
-    "keepalives": 1,
-    "keepalives_idle": 30,
-    "keepalives_interval": 10,
-    "keepalives_count": 5,
-}
-
-DB_CONFIG_USERS = {
-    "host": "ep-shiny-feather-ag2vjll4-pooler.c-2.eu-central-1.aws.neon.tech",
-    "port": 5432,
-    "dbname": "neondb",
-    "user": "neondb_owner",
-    "password": "npg_c6nFi5XeBjIY",
-    "sslmode": "require",
-    "keepalives": 1,
-    "keepalives_idle": 30,
-    "keepalives_interval": 10,
-    "keepalives_count": 5,
-}
-
-TOKEN_EXPIRATION_HOURS = 24 * 7
-
-# ✅ CONNECTION POOLING (MASSIVE PERFORMANCE BOOST)
-phones_pool = None
-users_pool = None
-
-def init_pools():
-    global phones_pool, users_pool
-    try:
-        phones_pool = pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
-            **DB_CONFIG_PHONES
-        )
-        users_pool = pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
-            **DB_CONFIG_USERS
-        )
-        print("✅ Database connection pools initialized")
-    except Exception as e:
-        print(f"❌ Failed to initialize connection pools: {e}")
-        raise
-
-@contextmanager
-def get_phones_db():
-    conn = phones_pool.getconn()
-    try:
-        yield conn
-    finally:
-        phones_pool.putconn(conn)
-
-@contextmanager
-def get_users_db(user_id: Optional[str] = None):
-    conn = users_pool.getconn()
-    try:
-        if user_id:
-            cursor = conn.cursor()
-            cursor.execute("SET LOCAL app.current_user_id = %s", (user_id,))
-            conn.commit()
-        yield conn
-    finally:
-        users_pool.putconn(conn)
-
-# ✅ IN-MEMORY CACHE FOR PHONE DATA
-PHONE_CACHE = {}
-PHONE_STATS_CACHE = {}
-CACHE_DURATION = timedelta(hours=6)  # Cache for 6 hours
-LATEST_CACHE = {}  # Cache for latest phones endpoint
-RECOMMENDATION_CACHE = {}
-CACHE_DURATION_SHORT = timedelta(minutes=15)  # Shorter TTL for frequently changing data
-
-
-def get_phone_cached(phone_id: int):
-    """Get phone with caching - 90% faster for repeated requests"""
-    if phone_id in PHONE_CACHE:
-        cached_data, cached_time = PHONE_CACHE[phone_id]
-        if datetime.now() - cached_time < CACHE_DURATION:
-            return cached_data
-    
-    # ✅ Limit cache size to prevent memory issues
-    if len(PHONE_CACHE) > 1000:
-        oldest = min(PHONE_CACHE.items(), key=lambda x: x[1][1])
-        PHONE_CACHE.pop(oldest[0])
-    
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM phones WHERE id = %s", (phone_id,))
-        data = cursor.fetchone()
-    
-    if data:
-        PHONE_CACHE[phone_id] = (dict(data), datetime.now())
-    return data
-
-def get_phone_stats_cached(phone_id: int):
-    """Get phone stats with caching"""
-    cache_key = f"stats_{phone_id}"
-    if cache_key in PHONE_STATS_CACHE:
-        cached_data, cached_time = PHONE_STATS_CACHE[cache_key]
-        if datetime.now() - cached_time < timedelta(minutes=30):  # Shorter cache for stats
-            return cached_data
-    
-    stats = calculate_phone_stats(phone_id)
-    PHONE_STATS_CACHE[cache_key] = (stats, datetime.now())
-    return stats
-
-def calculate_phone_stats(phone_id: int):
-    """Calculate phone statistics"""
-    stats = {
-        "average_rating": 0,
-        "total_reviews": 0,
-        "total_favorites": 0,
-        "total_owners": 0,
-        "rating_distribution": {"5": 0, "4": 0, "3": 0, "2": 0, "1": 0},
-        "verified_owners_percentage": 0
-    }
-    
-    with get_users_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute(
-            """SELECT 
-                COUNT(*) as total_reviews,
-                COALESCE(AVG(rating), 0) as avg_rating,
-                COUNT(CASE WHEN verified_owner = TRUE THEN 1 END) as verified_count,
-                COUNT(CASE WHEN is_owner = TRUE THEN 1 END) as owner_count
-               FROM reviews 
-               WHERE phone_id = %s AND is_visible = TRUE""",
-            (phone_id,)
-        )
-        review_data = cursor.fetchone()
-        
-        if review_data:
-            stats["total_reviews"] = review_data["total_reviews"]
-            stats["average_rating"] = float(review_data["avg_rating"])
-            stats["total_owners"] = review_data["owner_count"]
-            
-            if stats["total_reviews"] > 0:
-                stats["verified_owners_percentage"] = round(
-                    (review_data["verified_count"] / stats["total_reviews"]) * 100, 1
-                )
-        
-        cursor.execute(
-            """SELECT FLOOR(rating) as star_rating, COUNT(*) as count
-               FROM reviews 
-               WHERE phone_id = %s AND is_visible = TRUE
-               GROUP BY FLOOR(rating)""",
-            (phone_id,)
-        )
-        
-        for row in cursor.fetchall():
-            star = str(int(row["star_rating"]))
-            if star in stats["rating_distribution"]:
-                stats["rating_distribution"][star] = row["count"]
-        
-        cursor.execute(
-            "SELECT COUNT(*) as total_favorites FROM favorites WHERE phone_id = %s",
-            (phone_id,)
-        )
-        fav_data = cursor.fetchone()
-        if fav_data:
-            stats["total_favorites"] = fav_data["total_favorites"]
-    
-    return stats
-
-
-def invalidate_phone_cache(phone_id: int):
-    """Invalidate cache when data changes"""
-    PHONE_CACHE.pop(phone_id, None)
-    PHONE_STATS_CACHE.pop(f"stats_{phone_id}", None)
-
-def expand_search_query(q: str) -> str:
-    q_lower = q.lower().strip()
-    expansions = {
-        'samsung s': 'samsung galaxy s', 'samsung a': 'samsung galaxy a',
-        'samsung z': 'samsung galaxy z', 'samsung m': 'samsung galaxy m',
-        'samsung f': 'samsung galaxy f', 'apple ': 'apple iphone ',
-        'google ': 'google pixel ', 'huawei p': 'huawei p',
-        'huawei mate': 'huawei mate', 'xiaomi ': 'xiaomi ',
-        'redmi ': 'xiaomi redmi ', 'poco ': 'xiaomi poco ',
-        'oneplus ': 'oneplus ', 'oppo ': 'oppo ', 'vivo ': 'vivo ',
-        'realme ': 'realme ', 'nothing ': 'nothing phone ',
-        'asus rog': 'asus rog phone', 'sony ': 'sony xperia ',
-        'motorola ': 'motorola ', 'moto ': 'motorola moto ',
-        'honor ': 'honor ', 'zte ': 'zte ', 'tecno ': 'tecno ',
-        'infinix ': 'infinix ', 'itel ': 'itel ',
-    }
-    for short, full in expansions.items():
-        if q_lower.startswith(short) and not q_lower.startswith(full):
-            return full + q_lower[len(short):]
-    return q
-
-class UpdateReviewData(BaseModel):
-    rating: Optional[float] = None
-    title: Optional[str] = None
-    body: Optional[str] = None
-    is_owner: Optional[bool] = None
-
-app = FastAPI(
-    title="Mobylite API - Optimized",
-    description="High-performance phone comparison API",
-    version="3.1.0"
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://neondb_owner:npg_c6nFi5XeBjIY@ep-shiny-feather-ag2vjll4-pooler.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require",
 )
+
+pool: asyncpg.Pool = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global pool
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    yield
+    await pool.close()
+
+
+app = FastAPI(title="Mobylite API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://mobylite.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:3001"
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"]
 )
 
-# ✅ STARTUP EVENT: Initialize connection pools
-@app.on_event("startup")
-async def startup_event():
-    init_pools()
 
-# ✅ SHUTDOWN EVENT: Close connection pools
-@app.on_event("shutdown")
-async def shutdown_event():
-    if phones_pool:
-        phones_pool.closeall()
-    if users_pool:
-        users_pool.closeall()
-    print("✅ Database connection pools closed")
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
 
-security = HTTPBearer()
 
-# ✅ PYDANTIC MODELS (same as before)
-class PhoneBasic(BaseModel):
-    id: int
-    model_name: str
-    brand: str
-    price_usd: Optional[float]
-    main_image_url: Optional[str]
-    screen_size: Optional[float]
-    battery_capacity: Optional[int]
-    ram_options: Optional[List[int]]
-    main_camera_mp: Optional[int]
-    chipset: Optional[str]
-    antutu_score: Optional[int]
-    amazon_link: Optional[str]
-    release_year: Optional[int]
-    release_month: Optional[int]
-    release_day: Optional[int]
-    release_date_full: Optional[str]
+def row_to_dict(row) -> dict:
+    if row is None:
+        return None
+    d = dict(row)
+    for k, v in d.items():
+        if isinstance(v, datetime):
+            d[k] = v.isoformat()
+    return d
 
-class PhoneDetail(PhoneBasic):
-    price_original: Optional[float]
-    currency: Optional[str]
-    brand_link: Optional[str]
-    weight_g: Optional[float]
-    thickness_mm: Optional[float]
-    screen_resolution: Optional[str]
-    fast_charging_w: Optional[int]
-    storage_options: Optional[List[int]]
-    video_resolution: Optional[str]
-    geekbench_multi: Optional[int]
-    gpu_score: Optional[int]
-    full_specifications: Optional[dict]
-    features: Optional[List[str]]
 
-class SearchResponse(BaseModel):
-    total: int
-    page: int
-    page_size: int
-    results: List[PhoneBasic]
+def rows_to_list(rows) -> list:
+    return [row_to_dict(r) for r in rows]
 
-class FilterStats(BaseModel):
-    total_phones: int
-    total_brands: int
-    brands: list[dict]
-    price_range: dict
-    ram_options: list[int]
-    battery_range: dict
-    release_years: list[int]
 
-class SignupRequest(BaseModel):
-    email: EmailStr
-    password: str
-    display_name: str
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-class AuthResponse(BaseModel):
-    token: str
-    user: dict
-
-class ReviewCreate(BaseModel):
-    phone_id: int
-    rating: float = Field(ge=0, le=5)
-    title: str
-    body: str
-    pros: Optional[List[str]] = []
-    cons: Optional[List[str]] = []
-    is_owner: Optional[bool] = False
-
-class UpdateReviewData(BaseModel):
-    rating: Optional[float] = Field(None, ge=0, le=5)
-    title: Optional[str] = None
-    body: Optional[str] = None
-    is_owner: Optional[bool] = None
-
-class PriceAlertCreate(BaseModel):
-    phone_id: int
-    target_price: float
-
-class FavoriteCreate(BaseModel):
-    phone_id: int
-    notes: Optional[str] = None
-
-def create_token(user_id: str) -> str:
-    token = secrets.token_urlsafe(32)
-    expiry = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRATION_HOURS)
-    
-    with get_users_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO user_sessions (user_id, token, expires_at) VALUES (%s, %s, %s)",
-            (user_id, token, expiry)
-        )
-        conn.commit()
-    
-    return token
-
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    token = credentials.credentials
-    
-    with get_users_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(
-            "SELECT user_id, expires_at FROM user_sessions WHERE token = %s",
-            (token,)
-        )
-        session = cursor.fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        if datetime.utcnow() > session["expires_at"]:
-            cursor.execute("DELETE FROM user_sessions WHERE token = %s", (token,))
-            conn.commit()
-            raise HTTPException(status_code=401, detail="Token expired")
-        
-        return str(session["user_id"])
-
-# ✅ HEALTH CHECK ENDPOINT (for keep-alive pings)
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-@app.get("/")
-def root():
-    return {
-        "status": "online", 
-        "message": "Mobylite API v3.1 - Optimized with Connection Pooling & Caching", 
-        "docs": "/docs"
-    }
-
-# ✅ AUTH ENDPOINTS
-@app.post("/auth/signup", response_model=AuthResponse)
-def signup(data: SignupRequest):
-    with get_users_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("SELECT id FROM users WHERE email = %s", (data.email,))
-        if cursor.fetchone():
-            raise HTTPException(status_code=400, detail="Email already registered")
-        
-        cursor.execute(
-            "INSERT INTO users (email, password_hash, display_name) VALUES (%s, hash_password(%s), %s) RETURNING id, email, display_name, created_at",
-            (data.email, data.password, data.display_name)
-        )
-        user = cursor.fetchone()
-        conn.commit()
-        
-        token = create_token(str(user["id"]))
-        return {"token": token, "user": dict(user)}
-
-@app.post("/auth/login", response_model=AuthResponse)
-def login(data: LoginRequest):
-    with get_users_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("SELECT id, email, display_name, password_hash FROM users WHERE email = %s", (data.email,))
-        user = cursor.fetchone()
-        
-        if not user:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        
-        cursor.execute("SELECT verify_password(%s, %s) AS valid", (data.password, user["password_hash"]))
-        if not cursor.fetchone()["valid"]:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        
-        cursor.execute("UPDATE users SET last_login = NOW() WHERE id = %s", (user["id"],))
-        conn.commit()
-        
-        token = create_token(str(user["id"]))
-        del user["password_hash"]
-        return {"token": token, "user": user}
-
-@app.get("/auth/me")
-def get_current_user(user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, email, display_name, avatar_url, created_at FROM users WHERE id = %s", (user_id,))
-        user = cursor.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        return {"success": True, "user": dict(user)}
-
-# Add this model
-class GoogleAuthRequest(BaseModel):
-    credential: str
-
-# Add this endpoint
-@app.post("/auth/google")
-async def google_oauth(data: GoogleAuthRequest):
+def parse_json_safe(val) -> dict | list | None:
+    if val is None:
+        return None
+    if isinstance(val, (dict, list)):
+        return val
     try:
-        idinfo = id_token.verify_oauth2_token(
-            data.credential,
-            google_requests.Request(),
-            os.getenv("GOOGLE_CLIENT_ID")
-        )
-        
-        email = idinfo['email']
-        google_id = idinfo['sub']
-        display_name = idinfo.get('name', email.split('@')[0])
-        avatar_url = idinfo.get('picture')
-        
-        with get_users_db() as conn:
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            cursor.execute(
-                "SELECT * FROM users WHERE google_id = %s OR email = %s",
-                (google_id, email)
-            )
-            user = cursor.fetchone()
-            
-            if user:
-                if not user['google_id']:
-                    cursor.execute(
-                        "UPDATE users SET google_id = %s, avatar_url = %s WHERE id = %s",
-                        (google_id, avatar_url, user['id'])
-                    )
-                    conn.commit()
-            else:
-                cursor.execute(
-                    """INSERT INTO users (email, google_id, display_name, avatar_url, email_verified, password_hash)
-                       VALUES (%s, %s, %s, %s, TRUE, '')
-                       RETURNING id, email, display_name, avatar_url""",
-                    (email, google_id, display_name, avatar_url)
-                )
-                user = cursor.fetchone()
-                conn.commit()
-            
-            token = create_token(str(user['id']))
-            
-            return {
-                "token": token,
-                "user": {
-                    "id": str(user['id']),
-                    "email": user['email'],
-                    "display_name": user['display_name'],
-                    "avatar_url": user.get('avatar_url')
-                }
-            }
-            
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail="Invalid Google token")
-    except Exception as e:
-        print(f"Google OAuth error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ✅ FAVORITES ENDPOINTS
-@app.post("/favorites")
-def add_favorite(data: FavoriteCreate, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute(
-                "INSERT INTO favorites (user_id, phone_id, notes) VALUES (%s, %s, %s) RETURNING id, created_at",
-                (user_id, data.phone_id, data.notes)
-            )
-            result = cursor.fetchone()
-            conn.commit()
-            invalidate_phone_cache(data.phone_id)  # Invalidate stats cache
-            return {"success": True, "favorite": result}
-        except psycopg2.IntegrityError:
-            conn.rollback()
-            return {"success": True, "message": "Already in favorites"}
-
-@app.get("/favorites")
-def get_favorites(user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(
-            "SELECT phone_id, notes, created_at FROM favorites WHERE user_id = %s ORDER BY created_at DESC",
-            (user_id,)
-        )
-        favorites = cursor.fetchall()
-    
-    if not favorites:
-        return {"success": True, "favorites": []}
-    
-    # ✅ Use cached phone data
-    for fav in favorites:
-        fav["phone"] = get_phone_cached(fav["phone_id"])
-    
-    return {"success": True, "favorites": favorites}
-
-@app.delete("/favorites/{phone_id}")
-def remove_favorite(phone_id: int, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM favorites WHERE user_id = %s AND phone_id = %s", (user_id, phone_id))
-        conn.commit()
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Favorite not found")
-    invalidate_phone_cache(phone_id)
-    return {"success": True, "message": "Favorite removed"}
-
-# ✅ REVIEWS ENDPOINTS
-@app.post("/reviews")
-def create_review(review: ReviewCreate, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute(
-                """INSERT INTO reviews (user_id, phone_id, rating, title, body, pros, cons, is_owner) 
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id, created_at""",
-                (user_id, review.phone_id, review.rating, review.title, review.body, 
-                 review.pros, review.cons, review.is_owner)
-            )
-            result = cursor.fetchone()
-            conn.commit()
-            invalidate_phone_cache(review.phone_id)
-            return {"success": True, "review": result}
-        except psycopg2.IntegrityError:
-            raise HTTPException(status_code=400, detail="Already reviewed this phone")
+        return json.loads(val)
+    except Exception:
+        return None
 
 
-@app.put("/reviews/{review_id}")
-def update_review(review_id: str, data: UpdateReviewData, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("SELECT user_id, phone_id FROM reviews WHERE id = %s", (review_id,))
-        review = cursor.fetchone()
-        
-        if not review:
-            raise HTTPException(status_code=404, detail="Review not found")
-        if str(review["user_id"]) != user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
-        
-        update_fields = []
-        params = []
-        
-        if data.rating is not None:
-            update_fields.append("rating = %s")
-            params.append(data.rating)
-        if data.title is not None:
-            update_fields.append("title = %s")
-            params.append(data.title)
-        if data.body is not None:
-            update_fields.append("body = %s")
-            params.append(data.body)
-        if data.is_owner is not None:
-            update_fields.append("is_owner = %s")
-            params.append(data.is_owner)
-        
-        if not update_fields:
-            raise HTTPException(status_code=400, detail="No fields to update")
-        
-        update_fields.append("edited_at = NOW()")
-        params.append(review_id)
-        
-        sql = f"UPDATE reviews SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
-        cursor.execute(sql, params)
-        updated_review = cursor.fetchone()
-        conn.commit()
-        
-        invalidate_phone_cache(review["phone_id"])
-        
-        return {"success": True, "review": dict(updated_review)}
-        
-# ✅ FIXED: Public endpoint with optional authentication
-@app.get("/reviews/phone/{phone_id}")
-def get_phone_reviews(
-    phone_id: int, 
-    page: int = 1, 
-    page_size: int = 10, 
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))
+def slug_to_words(slug: str) -> str:
+    """galaxy-s25-ultra → galaxy s25 ultra"""
+    return slug.replace("-", " ")
+
+
+def build_phone_list_select() -> str:
+    """Columns needed for card display — lightweight, no full_specifications."""
+    return """
+        id,
+        model_name,
+        brand,
+        price_usd,
+        main_image_url,
+        screen_size,
+        battery_capacity,
+        ram_options,
+        storage_options,
+        main_camera_mp,
+        chipset,
+        antutu_score,
+        amazon_link,
+        release_year,
+        release_month,
+        release_day,
+        release_date_full,
+        weight_g,
+        fast_charging_w
+    """
+
+
+def build_phone_detail_select() -> str:
+    """All columns including full_specifications for detail page."""
+    return """
+        id,
+        model_name,
+        brand,
+        price_usd,
+        main_image_url,
+        screen_size,
+        battery_capacity,
+        ram_options,
+        storage_options,
+        main_camera_mp,
+        chipset,
+        antutu_score,
+        amazon_link,
+        release_year,
+        release_month,
+        release_day,
+        release_date_full,
+        price_original,
+        currency,
+        brand_link,
+        weight_g,
+        thickness_mm,
+        screen_resolution,
+        fast_charging_w,
+        video_resolution,
+        geekbench_multi,
+        gpu_score,
+        full_specifications,
+        features
+    """
+
+
+def compute_value_score(phone: dict, peers: list[dict]) -> float | None:
+    """
+    Value score: how good are this phone's specs relative to peers in ±30% price range.
+    Returns 0.0-10.0 or None if insufficient data.
+    """
+    if not phone.get("price_usd") or not peers:
+        return None
+
+    def spec_score(p: dict) -> float:
+        s = 0.0
+        if p.get("antutu_score"):
+            s += min(p["antutu_score"] / 2_000_000, 1.0) * 3.0
+        if p.get("main_camera_mp"):
+            s += min(p["main_camera_mp"] / 200, 1.0) * 2.0
+        if p.get("battery_capacity"):
+            s += min(p["battery_capacity"] / 7000, 1.0) * 2.0
+        if p.get("ram_options"):
+            max_ram = max(p["ram_options"]) if p["ram_options"] else 0
+            s += min(max_ram / 16, 1.0) * 1.5
+        if p.get("fast_charging_w"):
+            s += min(p["fast_charging_w"] / 100, 1.0) * 1.0
+        if p.get("screen_size"):
+            s += min(p["screen_size"] / 7.0, 1.0) * 0.5
+        return s
+
+    this_score = spec_score(phone)
+    if not peers:
+        return round(min(this_score / 10.0 * 10, 10), 1)
+
+    peer_scores = [spec_score(p) for p in peers if p.get("price_usd")]
+    if not peer_scores:
+        return None
+
+    max_peer = max(peer_scores) or 1
+    normalized = (this_score / max_peer) * 10
+    return round(min(normalized, 10), 1)
+
+
+def chipset_tier(chipset: str | None) -> str:
+    if not chipset:
+        return "unknown"
+    c = chipset.lower()
+    flagship_patterns = [
+        r"snapdragon 8 gen \d",
+        r"snapdragon 8 elite",
+        r"snapdragon 8s gen \d",
+        r"dimensity 9\d{3}",
+        r"exynos 2\d{3}",
+        r"apple a1[4-9]",
+        r"apple a\d+ pro",
+        r"tensor g[3-9]",
+        r"kirin 99",
+    ]
+    for pat in flagship_patterns:
+        if re.search(pat, c):
+            return "flagship"
+    mid_patterns = [
+        r"snapdragon 7",
+        r"snapdragon 6",
+        r"dimensity 8\d{2}",
+        r"dimensity 7\d{2}",
+        r"exynos 1\d{3}",
+        r"kirin 8",
+    ]
+    for pat in mid_patterns:
+        if re.search(pat, c):
+            return "mid"
+    return "entry"
+
+
+# ─── PHONE LIST / SEARCH ─────────────────────────────────────────────────────
+
+
+@app.get("/phones/search")
+async def search_phones(
+    q: Optional[str] = Query(None, description="Text search across model name and brand"),
+    brand: Optional[str] = Query(None),
+    min_price: Optional[float] = Query(None),
+    max_price: Optional[float] = Query(None),
+    min_ram: Optional[int] = Query(None),
+    min_battery: Optional[int] = Query(None),
+    min_camera_mp: Optional[int] = Query(None),
+    min_screen_size: Optional[float] = Query(None),
+    max_screen_size: Optional[float] = Query(None),
+    min_year: Optional[int] = Query(None),
+    max_weight: Optional[int] = Query(None, description="Max weight in grams"),
+    min_charging_w: Optional[int] = Query(None),
+    has_5g: Optional[bool] = Query(None),
+    chipset_tier_filter: Optional[str] = Query(None, alias="chipset_tier", description="flagship|mid|entry"),
+    sort_by: str = Query("release_year", description="release_year|price_usd|battery_capacity|main_camera_mp|antutu_score|weight_g"),
+    sort_order: str = Query("desc", description="asc|desc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(24, ge=1, le=100),
 ):
-    user_id = None
-    if credentials:
-        try:
-            user_id = verify_token(credentials)
-        except HTTPException:
-            user_id = None
-    
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        offset = (page - 1) * page_size
-        
-        cursor.execute(
-            """SELECT r.*, u.display_name, u.avatar_url
-               FROM reviews r
-               JOIN users u ON r.user_id = u.id
-               WHERE r.phone_id = %s AND r.is_visible = TRUE
-               ORDER BY r.created_at DESC LIMIT %s OFFSET %s""",
-            (phone_id, page_size, offset)
-        )
-        reviews = cursor.fetchall()
-        
-        cursor.execute("SELECT COUNT(*) as total FROM reviews WHERE phone_id = %s AND is_visible = TRUE", (phone_id,))
-        total = cursor.fetchone()["total"]
-        
-        cursor.execute("SELECT AVG(rating) as avg_rating FROM reviews WHERE phone_id = %s AND is_visible = TRUE", (phone_id,))
-        avg_rating = cursor.fetchone()["avg_rating"] or 0
-        
-        helpful_review_ids = []
-        if user_id:
-            cursor.execute(
-                "SELECT review_id FROM helpful_votes WHERE user_id = %s AND review_id IN (SELECT id FROM reviews WHERE phone_id = %s)",
-                (user_id, phone_id)
+    conditions = ["1=1"]
+    params = []
+    i = 1
+
+    if q and q.strip():
+        conditions.append(f"(LOWER(model_name) LIKE ${i} OR LOWER(brand) LIKE ${i})")
+        params.append(f"%{q.strip().lower()}%")
+        i += 1
+
+    if brand:
+        conditions.append(f"LOWER(brand) = ${i}")
+        params.append(brand.lower())
+        i += 1
+
+    if min_price is not None:
+        conditions.append(f"price_usd >= ${i}")
+        params.append(min_price)
+        i += 1
+
+    if max_price is not None:
+        conditions.append(f"price_usd <= ${i}")
+        params.append(max_price)
+        i += 1
+
+    if min_ram is not None:
+        conditions.append(f"${i} = ANY(ram_options)")
+        params.append(min_ram)
+        i += 1
+
+    if min_battery is not None:
+        conditions.append(f"battery_capacity >= ${i}")
+        params.append(min_battery)
+        i += 1
+
+    if min_camera_mp is not None:
+        conditions.append(f"main_camera_mp >= ${i}")
+        params.append(min_camera_mp)
+        i += 1
+
+    if min_screen_size is not None:
+        conditions.append(f"screen_size >= ${i}")
+        params.append(min_screen_size)
+        i += 1
+
+    if max_screen_size is not None:
+        conditions.append(f"screen_size <= ${i}")
+        params.append(max_screen_size)
+        i += 1
+
+    if min_year is not None:
+        conditions.append(f"release_year >= ${i}")
+        params.append(min_year)
+        i += 1
+
+    if max_weight is not None:
+        conditions.append(f"weight_g <= ${i}")
+        params.append(max_weight)
+        i += 1
+
+    if min_charging_w is not None:
+        conditions.append(f"fast_charging_w >= ${i}")
+        params.append(min_charging_w)
+        i += 1
+
+    # chipset tier — filter post-fetch is too slow; use regex in SQL
+    if chipset_tier_filter:
+        if chipset_tier_filter == "flagship":
+            conditions.append(
+                "(LOWER(chipset) ~ 'snapdragon 8 gen|snapdragon 8 elite|dimensity 9[0-9]{3}|exynos 2[0-9]{3}|apple a1[4-9]|tensor g[3-9]')"
             )
-            helpful_review_ids = [row["review_id"] for row in cursor.fetchall()]
-    
+        elif chipset_tier_filter == "mid":
+            conditions.append(
+                "(LOWER(chipset) ~ 'snapdragon [67]|dimensity [78][0-9]{2}|exynos 1[0-9]{3}')"
+            )
+        elif chipset_tier_filter == "entry":
+            conditions.append(
+                "(chipset IS NOT NULL AND LOWER(chipset) NOT LIKE '%snapdragon 8%' AND LOWER(chipset) NOT LIKE '%dimensity 9%')"
+            )
+
+    valid_sorts = {
+        "release_year": "release_year",
+        "price_usd": "price_usd",
+        "battery_capacity": "battery_capacity",
+        "main_camera_mp": "main_camera_mp",
+        "antutu_score": "antutu_score",
+        "weight_g": "weight_g",
+    }
+    sort_col = valid_sorts.get(sort_by, "release_year")
+    order = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+    where = " AND ".join(conditions)
+    offset = (page - 1) * page_size
+
+    count_sql = f"SELECT COUNT(*) FROM phones WHERE {where}"
+    data_sql = f"""
+        SELECT {build_phone_list_select()}
+        FROM phones
+        WHERE {where}
+        ORDER BY {sort_col} {order} NULLS LAST, id DESC
+        LIMIT {page_size} OFFSET {offset}
+    """
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(count_sql, *params)
+        rows = await conn.fetch(data_sql, *params)
+
+    phones = rows_to_list(rows)
+
     return {
-        "success": True,
         "total": total,
-        "avg_rating": float(avg_rating),
-        "reviews": reviews,
-        "helpful_review_ids": helpful_review_ids  # Only included if authenticated
+        "page": page,
+        "page_size": page_size,
+        "results": phones,
     }
 
 
-@app.get("/reviews/user")
-def get_user_reviews(user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM reviews WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
-        return {"reviews": cursor.fetchall()}
-        
+# ─── PHONE DETAIL ─────────────────────────────────────────────────────────────
 
-@app.delete("/reviews/{review_id}/helpful")
-def remove_helpful_vote(review_id: str, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Check if vote exists
-        cursor.execute(
-            "SELECT 1 FROM helpful_votes WHERE review_id = %s AND user_id = %s",
-            (review_id, user_id)
+
+@app.get("/phones/{phone_id}")
+async def get_phone(phone_id: int):
+    sql = f"SELECT {build_phone_detail_select()} FROM phones WHERE id = $1"
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(sql, phone_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Phone not found")
+
+    phone = row_to_dict(row)
+    phone["full_specifications"] = parse_json_safe(phone.get("full_specifications"))
+
+    # Compute value score vs peers in ±30% price band
+    if phone.get("price_usd"):
+        lo = phone["price_usd"] * 0.7
+        hi = phone["price_usd"] * 1.3
+        peer_sql = f"""
+            SELECT {build_phone_list_select()}
+            FROM phones
+            WHERE price_usd BETWEEN $1 AND $2 AND id != $3
+            LIMIT 50
+        """
+        async with pool.acquire() as conn:
+            peer_rows = await conn.fetch(peer_sql, lo, hi, phone_id)
+        peers = rows_to_list(peer_rows)
+        phone["value_score"] = compute_value_score(phone, peers)
+    else:
+        phone["value_score"] = None
+
+    phone["chipset_tier"] = chipset_tier(phone.get("chipset"))
+
+    return phone
+
+
+@app.get("/phones/{phone_id}/similar")
+async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24)):
+    """Find similar phones: same brand or same price tier with similar specs."""
+    async with pool.acquire() as conn:
+        base = await conn.fetchrow(
+            "SELECT brand, price_usd, battery_capacity, chipset FROM phones WHERE id = $1",
+            phone_id,
         )
-        if not cursor.fetchone():
-            return {"success": False, "message": "Vote not found"}
-        
-        # Delete the vote
-        cursor.execute(
-            "DELETE FROM helpful_votes WHERE review_id = %s AND user_id = %s",
-            (review_id, user_id)
-        )
-        
-        # Decrement helpful count
-        cursor.execute(
-            "UPDATE reviews SET helpful_count = GREATEST(helpful_count - 1, 0) WHERE id = %s RETURNING phone_id",
-            (review_id,)
-        )
-        result = cursor.fetchone()
-        conn.commit()
-        
-        if result:
-            invalidate_phone_cache(result["phone_id"])
-        
-        return {"success": True, "message": "Vote removed"}
+    if not base:
+        raise HTTPException(status_code=404, detail="Phone not found")
 
-@app.delete("/reviews/{review_id}")
-def delete_review(review_id: str, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Check if review exists and belongs to user
-        cursor.execute("SELECT user_id, phone_id FROM reviews WHERE id = %s", (review_id,))
-        review = cursor.fetchone()
-        
-        if not review:
-            raise HTTPException(status_code=404, detail="Review not found")
-        if str(review["user_id"]) != user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
-        
-        # Delete the review
-        cursor.execute("DELETE FROM reviews WHERE id = %s", (review_id,))
-        conn.commit()
-        
-        # Invalidate cache
-        invalidate_phone_cache(review["phone_id"])
-        
-        return {"success": True, "message": "Review deleted"}
+    params = [phone_id]
+    conditions = ["id != $1"]
+    i = 2
 
-# ✅ PRICE ALERTS ENDPOINTS
-@app.post("/price-alerts")
-def create_price_alert(alert: PriceAlertCreate, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            cursor.execute(
-                "INSERT INTO price_alerts (user_id, phone_id, target_price) VALUES (%s, %s, %s) RETURNING id, created_at",
-                (user_id, alert.phone_id, alert.target_price)
-            )
-            result = cursor.fetchone()
-            conn.commit()
-            return {"success": True, "alert": result}
-        except psycopg2.IntegrityError:
-            raise HTTPException(status_code=400, detail="Alert already exists")
+    if base["price_usd"]:
+        lo = base["price_usd"] * 0.7
+        hi = base["price_usd"] * 1.3
+        conditions.append(f"price_usd BETWEEN ${i} AND ${i+1}")
+        params += [lo, hi]
+        i += 2
 
-@app.get("/price-alerts")
-def get_price_alerts(user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM price_alerts WHERE user_id = %s AND is_active = TRUE ORDER BY created_at DESC", (user_id,))
-        return {"alerts": cursor.fetchall()}
+    where = " AND ".join(conditions)
 
-@app.delete("/price-alerts/{alert_id}")
-def delete_price_alert(alert_id: str, user_id: str = Depends(verify_token)):
-    with get_users_db(user_id) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM price_alerts WHERE id = %s AND user_id = %s", (alert_id, user_id))
-        conn.commit()
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Alert not found")
-    return {"success": True}
+    # Score same-brand higher in ORDER BY
+    brand_escaped = base["brand"].replace("'", "''")
+    sql = f"""
+        SELECT {build_phone_list_select()},
+               CASE WHEN brand = '{brand_escaped}' THEN 1 ELSE 0 END AS brand_match
+        FROM phones
+        WHERE {where}
+        ORDER BY brand_match DESC, release_year DESC NULLS LAST
+        LIMIT {limit}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
 
-# ✅ OPTIMIZED PHONE SEARCH (with relevance ranking)
-@app.get("/phones/search", response_model=SearchResponse)
-def search_phones(
-    q: Optional[str] = Query(None),
-    min_price: Optional[float] = Query(None, ge=0),
-    max_price: Optional[float] = Query(None, ge=0),
-    min_ram: Optional[int] = Query(None, ge=2, le=24),
-    min_storage: Optional[int] = Query(None, ge=32),
-    min_battery: Optional[int] = Query(None, ge=1000),
-    min_screen_size: Optional[float] = Query(None, ge=4.0, le=8.0),
-    min_camera_mp: Optional[int] = Query(None, ge=8),
-    brand: Optional[str] = Query(None),
-    min_year: Optional[int] = Query(None, ge=2020, le=2025),
+    results = []
+    for r in rows:
+        d = row_to_dict(r)
+        d.pop("brand_match", None)
+        results.append(d)
+
+    return {"phones": results}
+
+
+# ─── TRENDING ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/phones/trending")
+async def get_trending(limit: int = Query(10, ge=1, le=20)):
+    """
+    Returns the most recently released phones with AnTuTu scores as a proxy for
+    trending. In production you'd track page views; for V1 this is the best signal.
+    """
+    sql = f"""
+        SELECT {build_phone_list_select()}
+        FROM phones
+        WHERE release_year IS NOT NULL AND antutu_score IS NOT NULL
+        ORDER BY release_year DESC, antutu_score DESC
+        LIMIT {limit}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql)
+    return {"phones": rows_to_list(rows)}
+
+
+@app.get("/phones/latest")
+async def get_latest(limit: int = Query(20, ge=1, le=50)):
+    """Latest released phones for home page hero."""
+    sql = f"""
+        SELECT {build_phone_list_select()}
+        FROM phones
+        WHERE release_year IS NOT NULL
+        ORDER BY release_year DESC, release_month DESC NULLS LAST, id DESC
+        LIMIT {limit}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql)
+    return {"phones": rows_to_list(rows)}
+
+
+# ─── BRANDS ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/brands")
+async def get_brands():
+    """All brands with phone counts, sorted by count descending."""
+    sql = """
+        SELECT brand, COUNT(*) as phone_count
+        FROM phones
+        WHERE brand IS NOT NULL
+        GROUP BY brand
+        ORDER BY phone_count DESC
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql)
+    return {"brands": [{"brand": r["brand"], "count": r["phone_count"]} for r in rows]}
+
+
+@app.get("/brands/{brand_slug}")
+async def get_brand(brand_slug: str):
+    """Brand page data: stats + latest phone."""
+    brand_name = slug_to_words(brand_slug)
+
+    # Try exact match first, then ILIKE
+    sql = """
+        SELECT brand, COUNT(*) as total,
+               MIN(price_usd) as min_price,
+               MAX(price_usd) as max_price,
+               ROUND(AVG(price_usd)::numeric, 0) as avg_price,
+               ROUND(AVG(battery_capacity)::numeric, 0) as avg_battery,
+               MAX(release_year) as latest_year
+        FROM phones
+        WHERE LOWER(brand) = LOWER($1)
+        GROUP BY brand
+    """
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow(sql, brand_name)
+
+    if not stats:
+        raise HTTPException(status_code=404, detail="Brand not found")
+
+    # Latest phone
+    latest_sql = f"""
+        SELECT {build_phone_list_select()}
+        FROM phones
+        WHERE LOWER(brand) = LOWER($1)
+        ORDER BY release_year DESC, release_month DESC NULLS LAST
+        LIMIT 1
+    """
+    async with pool.acquire() as conn:
+        latest = await conn.fetchrow(latest_sql, brand_name)
+
+    return {
+        "brand": stats["brand"],
+        "total_phones": stats["total"],
+        "price_range": {
+            "min": float(stats["min_price"]) if stats["min_price"] else None,
+            "max": float(stats["max_price"]) if stats["max_price"] else None,
+            "avg": float(stats["avg_price"]) if stats["avg_price"] else None,
+        },
+        "avg_battery": int(stats["avg_battery"]) if stats["avg_battery"] else None,
+        "latest_year": stats["latest_year"],
+        "latest_phone": row_to_dict(latest) if latest else None,
+    }
+
+
+@app.get("/brands/{brand_slug}/phones")
+async def get_brand_phones(
+    brand_slug: str,
     sort_by: str = Query("release_year"),
     sort_order: str = Query("desc"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(24, ge=1, le=100),
 ):
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        conditions, params = [], []
-        has_search_query = bool(q and q.strip())
+    """All phones for a brand, paginated."""
+    brand_name = slug_to_words(brand_slug)
+    valid_sorts = {"release_year", "price_usd", "battery_capacity", "main_camera_mp", "antutu_score"}
+    sort_col = sort_by if sort_by in valid_sorts else "release_year"
+    order = "DESC" if sort_order.lower() == "desc" else "ASC"
+    offset = (page - 1) * page_size
 
-        if has_search_query:
-            expanded = expand_search_query(q)
-            words = expanded.strip().split()
-            
-            for word in words:
-                term = f"%{word}%"
-                search_conditions = [
-                    "LOWER(model_name) LIKE LOWER(%s)", 
-                    "LOWER(brand) LIKE LOWER(%s)", 
-                    "LOWER(chipset) LIKE LOWER(%s)",
-                ]
-                conditions.append("(" + " OR ".join(search_conditions) + ")")
-                params.extend([term] * len(search_conditions))
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            "SELECT COUNT(*) FROM phones WHERE LOWER(brand) = LOWER($1)", brand_name
+        )
+        rows = await conn.fetch(
+            f"""
+            SELECT {build_phone_list_select()}
+            FROM phones
+            WHERE LOWER(brand) = LOWER($1)
+            ORDER BY {sort_col} {order} NULLS LAST
+            LIMIT {page_size} OFFSET {offset}
+            """,
+            brand_name,
+        )
 
-        if min_price is not None:
-            conditions.append("price_usd >= %s")
-            params.append(min_price)
-        if max_price is not None:
-            conditions.append("price_usd <= %s")
-            params.append(max_price)
-        if min_ram:
-            conditions.append("EXISTS (SELECT 1 FROM unnest(ram_options) AS r WHERE r >= %s)")
-            params.append(min_ram)
-        if min_battery:
-            conditions.append("battery_capacity >= %s")
-            params.append(min_battery)
-        if brand:
-            conditions.append("LOWER(brand) = LOWER(%s)")
-            params.append(brand)
-        if min_year:
-            conditions.append("release_year >= %s")
-            params.append(min_year)
-
-        where = " AND ".join(conditions) if conditions else "1=1"
-        
-        cursor.execute(f"SELECT COUNT(*) as total FROM phones WHERE {where}", params)
-        total = cursor.fetchone()['total']
-
-        offset = (page - 1) * page_size
-        
-        if has_search_query:
-            expanded = expand_search_query(q)
-            words = expanded.strip().split()
-            search_term = words[0] if words else expanded
-            
-            relevance_score = """
-                CASE
-                    WHEN LOWER(model_name) LIKE LOWER(%s) THEN 1000
-                    WHEN LOWER(model_name) LIKE LOWER(%s) THEN 900
-                    WHEN LOWER(model_name) LIKE LOWER(%s) THEN 800
-                    WHEN LOWER(brand) LIKE LOWER(%s) THEN 700
-                    WHEN LOWER(brand) LIKE LOWER(%s) THEN 600
-                    ELSE 500
-                END
-            """
-            
-            relevance_params = [
-                f"{search_term}%",
-                f"% {search_term}%",
-                f"%{search_term}%",
-                f"{search_term}%",
-                f"%{search_term}%",
-            ]
-            
-            order_clause = f"({relevance_score}) DESC, release_year DESC NULLS LAST, release_month DESC NULLS LAST"
-            query_params = params + relevance_params + [page_size, offset]
-        else:
-            if sort_by == 'release_year':
-                order_clause = f"release_year {sort_order} NULLS LAST, release_month {sort_order} NULLS LAST, release_day {sort_order} NULLS LAST"
-            else:
-                order_clause = f"{sort_by} {sort_order} NULLS LAST"
-            query_params = params + [page_size, offset]
-        
-        sql = f"""SELECT id, model_name, brand, price_usd, main_image_url, screen_size, battery_capacity,
-                   ram_options, main_camera_mp, chipset, antutu_score, amazon_link,
-                   release_year, release_month, release_day, release_date_full
-            FROM phones WHERE {where} ORDER BY {order_clause} LIMIT %s OFFSET %s"""
-        
-        cursor.execute(sql, query_params)
-        results = cursor.fetchall()
-
-        return {"total": total, "page": page, "page_size": page_size, "results": results}
+    return {"total": total, "page": page, "page_size": page_size, "results": rows_to_list(rows)}
 
 
-@app.get("/phones/recommend")
-def recommend_phones(use_case: str, max_price: Optional[float] = None, limit: int = 50):
-    """Get phone recommendations with caching and error handling"""
+# ─── COMPARE ──────────────────────────────────────────────────────────────────
+
+
+@app.get("/phones/compare")
+async def compare_phones(ids: str = Query(..., description="Comma-separated phone IDs, 2-4")):
+    """Fetch multiple phones for compare page."""
     try:
-        # Check cache first
-        cache_key = f"{use_case}_{max_price}_{limit}"
-        if cache_key in RECOMMENDATION_CACHE:
-            cached_data, cached_time = RECOMMENDATION_CACHE[cache_key]
-            if datetime.now() - cached_time < CACHE_DURATION_SHORT:
-                return cached_data
-        
-        # Build safe query
-        with get_phones_db() as conn:
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            conditions = ["price_usd IS NOT NULL"]
-            params = []
-            
-            if max_price:
-                conditions.append("price_usd <= %s")
-                params.append(max_price)
-            
-            order_map = {
-                "gamer": "COALESCE(antutu_score, 0) * 0.5 + COALESCE(battery_capacity, 0) * 0.015 DESC",
-                "photographer": "COALESCE(main_camera_mp, 0) * 2 + COALESCE(battery_capacity, 0) * 0.01 DESC",
-                "budget": "price_usd ASC",
-                "flagship": "COALESCE(antutu_score, 0) * 0.4 + COALESCE(main_camera_mp, 0) * 3000 DESC",
-                "battery": "battery_capacity DESC",
-            }
-            
-            order_by = order_map.get(use_case.lower(), "release_year DESC")
-            where_clause = " AND ".join(conditions)
-            
-            sql = f"""
-                SELECT id, model_name, brand, price_usd, main_image_url, screen_size, 
-                       battery_capacity, ram_options, main_camera_mp, chipset, antutu_score
-                FROM phones 
-                WHERE {where_clause} 
-                ORDER BY {order_by} 
-                LIMIT %s
-            """
-            
-            params.append(limit)
-            cursor.execute(sql, params)
-            results = cursor.fetchall()
-            
-            response = {"use_case": use_case, "recommendations": results}
-            
-            # Cache the results
-            RECOMMENDATION_CACHE[cache_key] = (response, datetime.now())
-            
-            return response
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Recommendation error: {str(e)}")
+        id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ids must be comma-separated integers")
 
-@app.get("/phones/latest")
-def get_latest_phones(limit: int = 50):
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(
-            """SELECT id, model_name, brand, price_usd, main_image_url,
-                   screen_size, battery_capacity, ram_options,
-                   main_camera_mp, chipset, antutu_score,
-                   release_year, release_month, release_day,
-                   release_date_full
-            FROM   phones
-            WHERE  release_year IS NOT NULL
-            AND    release_month IS NOT NULL
-            AND    release_day IS NOT NULL
-            ORDER  BY release_year DESC,
-                      release_month DESC,
-                      release_day DESC
-            LIMIT  %s""",
-            (limit,)
-        )
-        return {"phones": cursor.fetchall()}
+    if len(id_list) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 phone IDs required")
+    if len(id_list) > 4:
+        raise HTTPException(status_code=400, detail="Maximum 4 phones")
 
-@app.get("/filters/stats", response_model=FilterStats)
-def get_filter_stats():
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("SELECT COUNT(*) AS total_phones FROM phones")
-        total_phones = cursor.fetchone()["total_phones"]
-        
-        cursor.execute("SELECT COUNT(DISTINCT brand) AS total_brands FROM phones WHERE brand IS NOT NULL")
-        total_brands = cursor.fetchone()["total_brands"]
-        
-        cursor.execute("SELECT brand, COUNT(*) AS count FROM phones WHERE brand IS NOT NULL GROUP BY brand ORDER BY count DESC")
-        brands = cursor.fetchall()
-        
-        cursor.execute("SELECT MIN(price_usd) AS min_price, MAX(price_usd) AS max_price FROM phones WHERE price_usd IS NOT NULL")
-        price_range = cursor.fetchone()
-        
-        cursor.execute("SELECT DISTINCT unnest(ram_options) AS ram FROM phones WHERE ram_options IS NOT NULL ORDER BY ram")
-        ram_options = [r["ram"] for r in cursor.fetchall()]
-        
-        cursor.execute("SELECT MIN(battery_capacity) AS min_battery, MAX(battery_capacity) AS max_battery FROM phones WHERE battery_capacity IS NOT NULL")
-        battery_range = cursor.fetchone()
-        
-        cursor.execute("SELECT DISTINCT release_year FROM phones WHERE release_year IS NOT NULL ORDER BY release_year DESC")
-        release_years = [r["release_year"] for r in cursor.fetchall()]
-        
-        return {
-            "total_phones": total_phones, 
-            "total_brands": total_brands, 
-            "brands": brands,
-            "price_range": price_range, 
-            "ram_options": ram_options,
-            "battery_range": battery_range, 
-            "release_years": release_years,
-        }
-
-@app.get("/phones/{phone_id}/also-compared")
-def get_also_compared(phone_id: int):
-    # Return empty array for now
-    return {"phones": []}
-
-@app.post("/history/views")
-def record_view(data: dict):
-    # Accept but don't process for now
-    return {"success": True}
-
-@app.get("/sitemap.xml")
-def generate_sitemap():
-    """Generate dynamic sitemap for all phones"""
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT brand, model_name, updated_at FROM phones")
-        phones = cursor.fetchall()
-    
-    sitemap = ['<?xml version="1.0" encoding="UTF-8"?>']
-    sitemap.append('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
-    
-    for phone in phones:
-        brand_slug = phone['brand'].lower().replace(' ', '-')
-        model_slug = createPhoneSlug({'brand': phone['brand'], 'model_name': phone['model_name']})
-        
-        sitemap.append(f'''
-        <url>
-            <loc>https://mobylite.vercel.app/{brand_slug}/{model_slug}</loc>
-            <lastmod>{phone['updated_at'].strftime('%Y-%m-%d')}</lastmod>
-            <priority>0.8</priority>
-        </url>
-        ''')
-    
-    sitemap.append('</urlset>')
-    
-    return Response(content=''.join(sitemap), media_type="application/xml")
-
-@app.get("/phones/compare-by-slug/{slugs}")
-def compare_phones_by_slug(slugs: str):
+    sql = f"""
+        SELECT {build_phone_detail_select()}
+        FROM phones
+        WHERE id = ANY($1::int[])
     """
-    Compare phones via URL slugs
-    Example: /phones/compare-by-slug/iphone-15-pro-vs-samsung-s24-ultra-vs-pixel-8-pro
-    """
-    
-    phone_slugs = slugs.split('-vs-')
-    
-    if len(phone_slugs) > 4:
-        raise HTTPException(status_code=400, detail="Max 4 phones allowed")
-    
-    if len(phone_slugs) < 2:
-        raise HTTPException(status_code=400, detail="At least 2 phones required")
-    
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, id_list)
+
     phones = []
-    
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        for slug in phone_slugs:
-            normalized = slug.replace('-', ' ').lower()
-            
-            cursor.execute(
-                """SELECT * FROM phones 
-                   WHERE LOWER(REPLACE(model_name, ' ', '-')) LIKE %s
-                   ORDER BY release_year DESC NULLS LAST
-                   LIMIT 1""",
-                (f"%{slug}%",)
-            )
-            
-            phone = cursor.fetchone()
-            
-            if not phone:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"Phone not found: {slug}"
-                )
-            
-            phones.append(dict(phone))
-    
-    # Get stats for all phones
-    for phone in phones:
-        phone['stats'] = get_phone_stats_cached(phone['id'])
-    
-    return {
-        "success": True,
-        "phones": phones,
-        "comparison_count": len(phones)
-    }
-    
-# ✅ PHONE ENDPOINTS (with caching)
-@app.get("/phones/{phone_id}", response_model=PhoneDetail)
-def get_phone_details(phone_id: int):
-    phone = get_phone_cached(phone_id)
-    if not phone:
-        raise HTTPException(status_code=404, detail="Phone not found")
-    return phone
+    for r in rows:
+        d = row_to_dict(r)
+        d["full_specifications"] = parse_json_safe(d.get("full_specifications"))
+        d["chipset_tier"] = chipset_tier(d.get("chipset"))
+        phones.append(d)
 
-@app.get("/phones/slug/{brand}/{model}")
-def get_phone_by_slug(brand: str, model: str):
-    """Get phone by SEO-friendly URL slug"""
-    
-    # Normalize the model name from URL
-    model_normalized = model.replace('-', ' ').lower()
-    brand_normalized = brand.replace('-', ' ').lower()
-    
-    with get_phones_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Fuzzy match - handles variations like "iphone-15-pro" vs "iPhone 15 Pro"
-        cursor.execute(
-            """SELECT * FROM phones 
-               WHERE LOWER(REPLACE(model_name, ' ', '-')) = %s 
-               AND LOWER(brand) = %s
-               LIMIT 1""",
-            (model_normalized.replace(' ', '-'), brand_normalized)
-        )
-        
-        phone = cursor.fetchone()
-        
-        if not phone:
-            raise HTTPException(status_code=404, detail="Phone not found")
-        
-        phone_dict = dict(phone)
-        phone_id = phone_dict['id']
-    
-    # Get reviews + stats in single response
-    with get_users_db() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute(
-            """SELECT r.*, u.display_name, u.avatar_url
-               FROM reviews r
-               JOIN users u ON r.user_id = u.id
-               WHERE r.phone_id = %s AND r.is_visible = TRUE
-               ORDER BY r.helpful_count DESC, r.created_at DESC
-               LIMIT 10""",
-            (phone_id,)
-        )
-        reviews = cursor.fetchall()
-        
-        stats = get_phone_stats_cached(phone_id)
-    
+    # Preserve order of requested IDs
+    phone_map = {p["id"]: p for p in phones}
+    ordered = [phone_map[i] for i in id_list if i in phone_map]
+
+    return {"phones": ordered}
+
+
+# ─── CATEGORY RANKINGS ────────────────────────────────────────────────────────
+
+
+CATEGORY_CONFIG = {
+    "camera-phones": {
+        "title": "Best Camera Phones",
+        "description": "Ranked by main sensor resolution, sensor size, optical zoom, and video capability.",
+        "sql": f"""
+            SELECT {{cols}},
+                   (
+                     COALESCE(main_camera_mp, 0) * 0.3 +
+                     COALESCE(antutu_score, 0) / 200000.0 * 0.1 +
+                     CASE WHEN fast_charging_w IS NOT NULL THEN 5 ELSE 0 END
+                   ) AS category_score
+            FROM phones
+            WHERE main_camera_mp IS NOT NULL AND release_year >= 2022
+            ORDER BY main_camera_mp DESC, antutu_score DESC NULLS LAST
+            LIMIT {{limit}}
+        """,
+    },
+    "battery-life": {
+        "title": "Best Battery Life",
+        "description": "Highest battery capacity phones, weighted by efficiency.",
+        "sql": f"""
+            SELECT {{cols}},
+                   battery_capacity::float AS category_score
+            FROM phones
+            WHERE battery_capacity IS NOT NULL AND release_year >= 2022
+            ORDER BY battery_capacity DESC
+            LIMIT {{limit}}
+        """,
+    },
+    "gaming-phones": {
+        "title": "Best Gaming Phones",
+        "description": "Top AnTuTu and Geekbench scores — the fastest chips available.",
+        "sql": f"""
+            SELECT {{cols}},
+                   COALESCE(antutu_score, 0)::float AS category_score
+            FROM phones
+            WHERE antutu_score IS NOT NULL AND release_year >= 2023
+            ORDER BY antutu_score DESC
+            LIMIT {{limit}}
+        """,
+    },
+    "under-300": {
+        "title": "Best Phones Under $300",
+        "description": "Best specs-per-dollar under $300.",
+        "sql": f"""
+            SELECT {{cols}},
+                   (
+                     COALESCE(battery_capacity, 0) / 500.0 +
+                     COALESCE(main_camera_mp, 0) / 10.0 +
+                     COALESCE(antutu_score, 0) / 100000.0
+                   ) AS category_score
+            FROM phones
+            WHERE price_usd <= 300 AND price_usd > 0 AND release_year >= 2022
+            ORDER BY category_score DESC
+            LIMIT {{limit}}
+        """,
+    },
+    "under-500": {
+        "title": "Best Phones Under $500",
+        "description": "Best value in the $150-$500 range.",
+        "sql": f"""
+            SELECT {{cols}},
+                   (
+                     COALESCE(battery_capacity, 0) / 500.0 +
+                     COALESCE(main_camera_mp, 0) / 10.0 +
+                     COALESCE(antutu_score, 0) / 100000.0
+                   ) AS category_score
+            FROM phones
+            WHERE price_usd <= 500 AND price_usd > 0 AND release_year >= 2022
+            ORDER BY category_score DESC
+            LIMIT {{limit}}
+        """,
+    },
+    "lightweight": {
+        "title": "Lightest Phones",
+        "description": "Phones under 175g with flagship-or-better specs.",
+        "sql": f"""
+            SELECT {{cols}},
+                   (1000.0 - COALESCE(weight_g, 999)) AS category_score
+            FROM phones
+            WHERE weight_g IS NOT NULL AND weight_g <= 200 AND release_year >= 2022
+            ORDER BY weight_g ASC
+            LIMIT {{limit}}
+        """,
+    },
+    "compact-phones": {
+        "title": "Best Compact Phones",
+        "description": "Screen size under 6.3 inches — phones that fit comfortably in one hand.",
+        "sql": f"""
+            SELECT {{cols}},
+                   COALESCE(antutu_score, 0)::float AS category_score
+            FROM phones
+            WHERE screen_size <= 6.3 AND screen_size IS NOT NULL AND release_year >= 2022
+            ORDER BY antutu_score DESC NULLS LAST, release_year DESC
+            LIMIT {{limit}}
+        """,
+    },
+    "fast-charging": {
+        "title": "Fastest Charging Phones",
+        "description": "Wired charging speed in watts — less waiting, more using.",
+        "sql": f"""
+            SELECT {{cols}},
+                   COALESCE(fast_charging_w, 0)::float AS category_score
+            FROM phones
+            WHERE fast_charging_w IS NOT NULL AND fast_charging_w > 0 AND release_year >= 2022
+            ORDER BY fast_charging_w DESC
+            LIMIT {{limit}}
+        """,
+    },
+}
+
+
+@app.get("/categories")
+async def list_categories():
     return {
-        "success": True,
-        "phone": phone_dict,
-        "reviews": reviews,
-        "stats": stats
+        "categories": [
+            {"slug": slug, "title": cfg["title"], "description": cfg["description"]}
+            for slug, cfg in CATEGORY_CONFIG.items()
+        ]
     }
-    
-@app.get("/phones/{phone_id}/stats")
-def get_phone_stats(phone_id: int):
-    stats = get_phone_stats_cached(phone_id)
-    return {"success": True, "stats": stats}
+
+
+@app.get("/categories/{category_slug}")
+async def get_category(category_slug: str, limit: int = Query(10, ge=5, le=20)):
+    cfg = CATEGORY_CONFIG.get(category_slug)
+    if not cfg:
+        raise HTTPException(status_code=404, detail=f"Category '{category_slug}' not found")
+
+    cols = build_phone_list_select()
+    sql = cfg["sql"].format(cols=cols, limit=limit)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql)
+
+    phones = []
+    for r in rows:
+        d = row_to_dict(r)
+        d["category_score"] = round(float(d.pop("category_score", 0) or 0), 2)
+        phones.append(d)
+
+    return {
+        "slug": category_slug,
+        "title": cfg["title"],
+        "description": cfg["description"],
+        "phones": phones,
+    }
+
+
+# ─── FILTERS / STATS ──────────────────────────────────────────────────────────
+
+
+@app.get("/filters/stats")
+async def get_filter_stats():
+    """
+    Returns ranges and counts needed to build filter UI.
+    Called once on home page load to populate slider ranges.
+    """
+    sql = """
+        SELECT
+            COUNT(*) as total,
+            COUNT(DISTINCT brand) as total_brands,
+            MIN(price_usd) as min_price,
+            MAX(price_usd) as max_price,
+            MIN(battery_capacity) as min_battery,
+            MAX(battery_capacity) as max_battery,
+            MIN(screen_size) as min_screen,
+            MAX(screen_size) as max_screen,
+            MIN(weight_g) as min_weight,
+            MAX(weight_g) as max_weight,
+            MIN(fast_charging_w) as min_charging,
+            MAX(fast_charging_w) as max_charging,
+            MIN(release_year) as min_year,
+            MAX(release_year) as max_year
+        FROM phones
+        WHERE price_usd > 0
+    """
+
+    brands_sql = """
+        SELECT brand, COUNT(*) as count
+        FROM phones
+        WHERE brand IS NOT NULL
+        GROUP BY brand
+        ORDER BY count DESC
+    """
+
+    ram_sql = """
+        SELECT DISTINCT unnest(ram_options) as ram
+        FROM phones
+        WHERE ram_options IS NOT NULL
+        ORDER BY ram
+    """
+
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow(sql)
+        brands = await conn.fetch(brands_sql)
+        rams = await conn.fetch(ram_sql)
+
+    return {
+        "total_phones": stats["total"],
+        "total_brands": stats["total_brands"],
+        "price_range": {
+            "min": float(stats["min_price"]) if stats["min_price"] else 0,
+            "max": float(stats["max_price"]) if stats["max_price"] else 5000,
+        },
+        "battery_range": {
+            "min": int(stats["min_battery"]) if stats["min_battery"] else 1000,
+            "max": int(stats["max_battery"]) if stats["max_battery"] else 10000,
+        },
+        "screen_range": {
+            "min": float(stats["min_screen"]) if stats["min_screen"] else 4.0,
+            "max": float(stats["max_screen"]) if stats["max_screen"] else 7.5,
+        },
+        "weight_range": {
+            "min": int(stats["min_weight"]) if stats["min_weight"] else 100,
+            "max": int(stats["max_weight"]) if stats["max_weight"] else 300,
+        },
+        "charging_range": {
+            "min": int(stats["min_charging"]) if stats["min_charging"] else 5,
+            "max": int(stats["max_charging"]) if stats["max_charging"] else 240,
+        },
+        "year_range": {
+            "min": int(stats["min_year"]) if stats["min_year"] else 2018,
+            "max": int(stats["max_year"]) if stats["max_year"] else 2025,
+        },
+        "brands": [{"brand": r["brand"], "count": r["count"]} for r in brands],
+        "ram_options": [r["ram"] for r in rams if r["ram"]],
+    }
+
+
+# ─── HELP ME CHOOSE ───────────────────────────────────────────────────────────
+
+
+@app.get("/recommend")
+async def recommend(
+    min_price: Optional[float] = Query(None),
+    max_price: Optional[float] = Query(None),
+    priorities: str = Query(..., description="Comma-separated: camera,battery,performance,compact,lightweight,display,fast_charging,value"),
+    limit: int = Query(5, ge=3, le=10),
+):
+    """
+    Returns top phones matching budget + priorities.
+    Scoring: each priority contributes weighted spec scores, normalized to 0-10.
+    """
+    priority_list = [p.strip().lower() for p in priorities.split(",") if p.strip()]
+
+    conditions = ["1=1"]
+    params = []
+    i = 1
+
+    if min_price is not None:
+        conditions.append(f"price_usd >= ${i}")
+        params.append(min_price)
+        i += 1
+
+    if max_price is not None:
+        conditions.append(f"price_usd <= ${i}")
+        params.append(max_price)
+        i += 1
+
+    where = " AND ".join(conditions)
+
+    sql = f"""
+        SELECT {build_phone_list_select()}
+        FROM phones
+        WHERE {where} AND release_year >= 2022
+        ORDER BY release_year DESC
+        LIMIT 200
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    phones = rows_to_list(rows)
+    if not phones:
+        return {"phones": []}
+
+    # Normalizers
+    def norm(val, lo, hi):
+        if val is None or hi == lo:
+            return 0.0
+        return max(0.0, min(1.0, (val - lo) / (hi - lo)))
+
+    cam_max = max((p["main_camera_mp"] or 0) for p in phones) or 1
+    bat_max = max((p["battery_capacity"] or 0) for p in phones) or 1
+    ant_max = max((p["antutu_score"] or 0) for p in phones) or 1
+    chg_max = max((p["fast_charging_w"] or 0) for p in phones) or 1
+    screen_max = max((p["screen_size"] or 0) for p in phones) or 1
+    screen_min = min((p["screen_size"] or 100) for p in phones) or 1
+    weight_max = max((p["weight_g"] or 0) for p in phones) or 1
+
+    def score_phone(p: dict, priorities: list[str]) -> float:
+        s = 0.0
+        n = len(priorities) or 1
+        for pr in priorities:
+            if pr == "camera":
+                s += norm(p["main_camera_mp"] or 0, 0, cam_max)
+            elif pr == "battery":
+                s += norm(p["battery_capacity"] or 0, 0, bat_max)
+            elif pr == "performance":
+                s += norm(p["antutu_score"] or 0, 0, ant_max)
+            elif pr == "compact":
+                s += 1.0 - norm(p["screen_size"] or screen_max, screen_min, screen_max)
+            elif pr == "lightweight":
+                s += 1.0 - norm(p["weight_g"] or weight_max, 0, weight_max)
+            elif pr == "display":
+                # screen size + inferred AMOLED bonus
+                s += norm(p["screen_size"] or 0, screen_min, screen_max) * 0.7
+                s += 0.3  # assume display quality is uniform; chipset proxy
+            elif pr == "fast_charging":
+                s += norm(p["fast_charging_w"] or 0, 0, chg_max)
+            elif pr == "value":
+                # specs / price
+                spec = (
+                    (p["main_camera_mp"] or 0) / 200 +
+                    (p["battery_capacity"] or 0) / 7000 +
+                    (p["antutu_score"] or 0) / 2_000_000
+                )
+                price_norm = p["price_usd"] / 2000 if p["price_usd"] else 1
+                s += spec / max(price_norm, 0.01) / 3
+        return (s / n) * 10
+
+    scored = []
+    for p in phones:
+        match_score = round(score_phone(p, priority_list), 1)
+        p["match_score"] = match_score
+        scored.append(p)
+
+    scored.sort(key=lambda x: x["match_score"], reverse=True)
+    top = scored[:limit]
+
+    return {"phones": top, "priorities": priority_list}
+
+
+# ─── HEALTH ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health():
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        return {"status": "ok", "db": "connected"}
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"status": "error", "detail": str(e)})
     
 
 if __name__ == "__main__":
