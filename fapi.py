@@ -15,7 +15,7 @@ from datetime import datetime
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://neondb_owner:npg_c6nFi5XeBjIY@ep-shiny-feather-ag2vjll4-pooler.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require",
+    "postgresql://neondb_owner:npg_iuklm3PF4Itw@ep-twilight-brook-agshqx5x-pooler.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require",
 )
 
 pool: asyncpg.Pool = None
