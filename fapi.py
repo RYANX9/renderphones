@@ -2,9 +2,9 @@
 Mobylite API — V1
 """
 
-from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from contextlib import asynccontextmanager
 from typing import Optional
 import os
@@ -34,6 +34,7 @@ app = FastAPI(title="Mobylite API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -143,7 +144,26 @@ def chipset_tier(chipset: str | None) -> str:
     return "entry"
 
 
-# ─── STATIC PHONE ROUTES (must come before /{phone_id}) ──────────────────────
+def expand_search_query(q: str) -> str:
+    q_lower = q.lower().strip()
+    expansions = {
+        "samsung s": "samsung galaxy s",
+        "samsung a": "samsung galaxy a",
+        "samsung z": "samsung galaxy z",
+        "redmi ": "xiaomi redmi ",
+        "poco ": "xiaomi poco ",
+        "moto ": "motorola moto ",
+        "nothing ": "nothing phone ",
+        "asus rog": "asus rog phone",
+        "sony ": "sony xperia ",
+    }
+    for short, full in expansions.items():
+        if q_lower.startswith(short) and not q_lower.startswith(full):
+            return full + q_lower[len(short):]
+    return q
+
+
+# ─── STATIC /phones/* ROUTES — must be registered before /{phone_id} ─────────
 
 @app.get("/phones/search")
 async def search_phones(
@@ -159,7 +179,6 @@ async def search_phones(
     min_year: Optional[int] = Query(None),
     max_weight: Optional[int] = Query(None),
     min_charging_w: Optional[int] = Query(None),
-    has_5g: Optional[bool] = Query(None),
     chipset_tier_filter: Optional[str] = Query(None, alias="chipset_tier"),
     sort_by: str = Query("release_year"),
     sort_order: str = Query("desc"),
@@ -171,14 +190,14 @@ async def search_phones(
     i = 1
 
     if q and q.strip():
-        conditions.append(f"(LOWER(model_name) LIKE ${i} OR LOWER(brand) LIKE ${i})")
-        params.append(f"%{q.strip().lower()}%")
+        expanded = expand_search_query(q.strip())
+        conditions.append(f"(LOWER(model_name) LIKE ${i} OR LOWER(brand) LIKE ${i} OR LOWER(chipset) LIKE ${i})")
+        params.append(f"%{expanded.lower()}%")
         i += 1
 
     if brand:
         conditions.append(f"LOWER(brand) = ${i}")
-        params.append(brand.lower())
-        i += 1
+        params.append(brand.lower()); i += 1
 
     if min_price is not None:
         conditions.append(f"price_usd >= ${i}")
@@ -222,22 +241,13 @@ async def search_phones(
 
     if chipset_tier_filter:
         if chipset_tier_filter == "flagship":
-            conditions.append(
-                "(LOWER(chipset) ~ 'snapdragon 8 gen|snapdragon 8 elite|dimensity 9[0-9]{3}|exynos 2[0-9]{3}|apple a1[4-9]|tensor g[3-9]')"
-            )
+            conditions.append("(LOWER(chipset) ~ 'snapdragon 8 gen|snapdragon 8 elite|dimensity 9[0-9]{3}|exynos 2[0-9]{3}|apple a1[4-9]|tensor g[3-9]')")
         elif chipset_tier_filter == "mid":
-            conditions.append(
-                "(LOWER(chipset) ~ 'snapdragon [67]|dimensity [78][0-9]{2}|exynos 1[0-9]{3}')"
-            )
+            conditions.append("(LOWER(chipset) ~ 'snapdragon [67]|dimensity [78][0-9]{2}|exynos 1[0-9]{3}')")
         elif chipset_tier_filter == "entry":
-            conditions.append(
-                "(chipset IS NOT NULL AND LOWER(chipset) NOT LIKE '%snapdragon 8%' AND LOWER(chipset) NOT LIKE '%dimensity 9%')"
-            )
+            conditions.append("(chipset IS NOT NULL AND LOWER(chipset) NOT LIKE '%snapdragon 8%' AND LOWER(chipset) NOT LIKE '%dimensity 9%')")
 
-    valid_sorts = {
-        "release_year", "price_usd", "battery_capacity",
-        "main_camera_mp", "antutu_score", "weight_g",
-    }
+    valid_sorts = {"release_year", "price_usd", "battery_capacity", "main_camera_mp", "antutu_score", "weight_g"}
     sort_col = sort_by if sort_by in valid_sorts else "release_year"
     order = "DESC" if sort_order.lower() == "desc" else "ASC"
     where = " AND ".join(conditions)
@@ -261,29 +271,31 @@ async def search_phones(
 
 @app.get("/phones/trending")
 async def get_trending(limit: int = Query(10, ge=1, le=20)):
-    sql = f"""
-        SELECT {build_phone_list_select()}
-        FROM phones
-        WHERE release_year IS NOT NULL AND antutu_score IS NOT NULL
-        ORDER BY release_year DESC, antutu_score DESC
-        LIMIT {limit}
-    """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(sql)
+        rows = await conn.fetch(
+            f"""
+            SELECT {build_phone_list_select()}
+            FROM phones
+            WHERE release_year IS NOT NULL AND antutu_score IS NOT NULL
+            ORDER BY release_year DESC, antutu_score DESC
+            LIMIT {limit}
+            """
+        )
     return {"phones": rows_to_list(rows)}
 
 
 @app.get("/phones/latest")
 async def get_latest(limit: int = Query(20, ge=1, le=50)):
-    sql = f"""
-        SELECT {build_phone_list_select()}
-        FROM phones
-        WHERE release_year IS NOT NULL
-        ORDER BY release_year DESC, release_month DESC NULLS LAST, id DESC
-        LIMIT {limit}
-    """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(sql)
+        rows = await conn.fetch(
+            f"""
+            SELECT {build_phone_list_select()}
+            FROM phones
+            WHERE release_year IS NOT NULL
+            ORDER BY release_year DESC, release_month DESC NULLS LAST, release_day DESC NULLS LAST, id DESC
+            LIMIT {limit}
+            """
+        )
     return {"phones": rows_to_list(rows)}
 
 
@@ -316,7 +328,82 @@ async def compare_phones(ids: str = Query(..., description="Comma-separated phon
     return {"phones": [phone_map[i] for i in id_list if i in phone_map]}
 
 
-# ─── PARAMETERIZED PHONE ROUTES (after all static /phones/* routes) ───────────
+@app.get("/phones/recommend")
+async def recommend(
+    min_price: Optional[float] = Query(None),
+    max_price: Optional[float] = Query(None),
+    priorities: str = Query(..., description="Comma-separated: camera,battery,performance,compact,lightweight,display,fast_charging,value"),
+    limit: int = Query(5, ge=3, le=10),
+):
+    priority_list = [p.strip().lower() for p in priorities.split(",") if p.strip()]
+
+    conditions = ["release_year >= 2022"]
+    params = []
+    i = 1
+
+    if min_price is not None:
+        conditions.append(f"price_usd >= ${i}"); params.append(min_price); i += 1
+    if max_price is not None:
+        conditions.append(f"price_usd <= ${i}"); params.append(max_price); i += 1
+
+    where = " AND ".join(conditions)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {build_phone_list_select()} FROM phones WHERE {where} ORDER BY release_year DESC LIMIT 200",
+            *params,
+        )
+
+    phones = rows_to_list(rows)
+    if not phones:
+        return {"phones": [], "priorities": priority_list}
+
+    def _max(key): return max((p[key] or 0) for p in phones) or 1
+    def norm(val, lo, hi): return max(0.0, min(1.0, ((val or 0) - lo) / (hi - lo))) if hi != lo else 0.0
+
+    cam_max = _max("main_camera_mp")
+    bat_max = _max("battery_capacity")
+    ant_max = _max("antutu_score")
+    chg_max = _max("fast_charging_w")
+    screen_max = _max("screen_size")
+    screen_min = min((p["screen_size"] or 100) for p in phones) or 1
+    weight_max = _max("weight_g")
+
+    def score_phone(p: dict) -> float:
+        s = 0.0
+        for pr in priority_list:
+            if pr == "camera":
+                s += norm(p["main_camera_mp"], 0, cam_max)
+            elif pr == "battery":
+                s += norm(p["battery_capacity"], 0, bat_max)
+            elif pr == "performance":
+                s += norm(p["antutu_score"], 0, ant_max)
+            elif pr == "compact":
+                s += 1.0 - norm(p["screen_size"] or screen_max, screen_min, screen_max)
+            elif pr == "lightweight":
+                s += 1.0 - norm(p["weight_g"] or weight_max, 0, weight_max)
+            elif pr == "display":
+                s += norm(p["screen_size"] or 0, screen_min, screen_max) * 0.7 + 0.3
+            elif pr == "fast_charging":
+                s += norm(p["fast_charging_w"], 0, chg_max)
+            elif pr == "value":
+                spec = (
+                    (p["main_camera_mp"] or 0) / 200 +
+                    (p["battery_capacity"] or 0) / 7000 +
+                    (p["antutu_score"] or 0) / 2_000_000
+                )
+                price_norm = p["price_usd"] / 2000 if p["price_usd"] else 1
+                s += spec / max(price_norm, 0.01) / 3
+        return round((s / (len(priority_list) or 1)) * 10, 1)
+
+    for p in phones:
+        p["match_score"] = score_phone(p)
+
+    phones.sort(key=lambda x: x["match_score"], reverse=True)
+    return {"phones": phones[:limit], "priorities": priority_list}
+
+
+# ─── PARAMETERIZED /phones/{phone_id} — MUST come after all static /phones/* ──
 
 @app.get("/phones/{phone_id}")
 async def get_phone(phone_id: int):
@@ -355,8 +442,7 @@ async def get_phone(phone_id: int):
 async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24)):
     async with pool.acquire() as conn:
         base = await conn.fetchrow(
-            "SELECT brand, price_usd FROM phones WHERE id = $1",
-            phone_id,
+            "SELECT brand, price_usd FROM phones WHERE id = $1", phone_id
         )
     if not base:
         raise HTTPException(status_code=404, detail="Phone not found")
@@ -394,6 +480,27 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
         results.append(d)
 
     return {"phones": results}
+
+
+@app.get("/phones/{phone_id}/stats")
+async def get_phone_stats(phone_id: int):
+    """Stub — returns zeroed stats. Wire to real data when reviews table exists."""
+    return {
+        "success": True,
+        "stats": {
+            "average_rating": 0,
+            "total_reviews": 0,
+            "total_favorites": 0,
+            "total_owners": 0,
+            "rating_distribution": {"5": 0, "4": 0, "3": 0, "2": 0, "1": 0},
+            "verified_owners_percentage": 0,
+        }
+    }
+
+
+@app.get("/phones/{phone_id}/also-compared")
+async def get_also_compared(phone_id: int):
+    return {"phones": []}
 
 
 # ─── BRANDS ───────────────────────────────────────────────────────────────────
@@ -497,7 +604,7 @@ async def get_brand_phones(
 CATEGORY_CONFIG = {
     "camera-phones": {
         "title": "Best Camera Phones",
-        "description": "Ranked by main sensor resolution, sensor size, optical zoom, and video capability.",
+        "description": "Ranked by main sensor resolution and processing power.",
         "sql": """
             SELECT {cols},
                    (COALESCE(main_camera_mp, 0) * 0.3 + COALESCE(antutu_score, 0) / 200000.0 * 0.1) AS category_score
@@ -509,7 +616,7 @@ CATEGORY_CONFIG = {
     },
     "battery-life": {
         "title": "Best Battery Life",
-        "description": "Highest battery capacity phones, weighted by efficiency.",
+        "description": "Highest battery capacity phones.",
         "sql": """
             SELECT {cols}, battery_capacity::float AS category_score
             FROM phones
@@ -520,7 +627,7 @@ CATEGORY_CONFIG = {
     },
     "gaming-phones": {
         "title": "Best Gaming Phones",
-        "description": "Top AnTuTu and Geekbench scores.",
+        "description": "Top AnTuTu scores — the fastest chips available.",
         "sql": """
             SELECT {cols}, COALESCE(antutu_score, 0)::float AS category_score
             FROM phones
@@ -543,7 +650,7 @@ CATEGORY_CONFIG = {
     },
     "under-500": {
         "title": "Best Phones Under $500",
-        "description": "Best value in the $150-$500 range.",
+        "description": "Best value in the mid-range.",
         "sql": """
             SELECT {cols},
                    (COALESCE(battery_capacity, 0) / 500.0 + COALESCE(main_camera_mp, 0) / 10.0 + COALESCE(antutu_score, 0) / 100000.0) AS category_score
@@ -642,6 +749,9 @@ async def get_filter_stats():
         rams = await conn.fetch(
             "SELECT DISTINCT unnest(ram_options) as ram FROM phones WHERE ram_options IS NOT NULL ORDER BY ram"
         )
+        years = await conn.fetch(
+            "SELECT DISTINCT release_year FROM phones WHERE release_year IS NOT NULL ORDER BY release_year DESC"
+        )
 
     return {
         "total_phones": stats["total"],
@@ -654,84 +764,32 @@ async def get_filter_stats():
         "year_range": {"min": int(stats["min_year"] or 2018), "max": int(stats["max_year"] or 2025)},
         "brands": [{"brand": r["brand"], "count": r["count"]} for r in brands],
         "ram_options": [r["ram"] for r in rams if r["ram"]],
+        "release_years": [r["release_year"] for r in years],
     }
 
 
-# ─── RECOMMEND ────────────────────────────────────────────────────────────────
+# ─── SITEMAP ──────────────────────────────────────────────────────────────────
 
-@app.get("/recommend")
-async def recommend(
-    min_price: Optional[float] = Query(None),
-    max_price: Optional[float] = Query(None),
-    priorities: str = Query(...),
-    limit: int = Query(5, ge=3, le=10),
-):
-    priority_list = [p.strip().lower() for p in priorities.split(",") if p.strip()]
-
-    conditions = ["1=1"]
-    params = []
-    i = 1
-
-    if min_price is not None:
-        conditions.append(f"price_usd >= ${i}"); params.append(min_price); i += 1
-    if max_price is not None:
-        conditions.append(f"price_usd <= ${i}"); params.append(max_price); i += 1
-
-    where = " AND ".join(conditions)
-
+@app.get("/sitemap.xml")
+async def generate_sitemap():
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"SELECT {build_phone_list_select()} FROM phones WHERE {where} AND release_year >= 2022 ORDER BY release_year DESC LIMIT 200",
-            *params,
-        )
+        rows = await conn.fetch("SELECT brand, model_name FROM phones")
 
-    phones = rows_to_list(rows)
-    if not phones:
-        return {"phones": []}
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for r in rows:
+        brand_slug = r["brand"].lower().replace(" ", "-")
+        model_slug = r["model_name"].lower().replace(" ", "-")
+        lines.append(f'<url><loc>https://mobylite.vercel.app/{brand_slug}/{model_slug}</loc><priority>0.8</priority></url>')
+    lines.append("</urlset>")
 
-    def _max(key): return max((p[key] or 0) for p in phones) or 1
-    def norm(val, lo, hi): return max(0.0, min(1.0, ((val or 0) - lo) / (hi - lo))) if hi != lo else 0.0
+    return Response(content="\n".join(lines), media_type="application/xml")
 
-    cam_max = _max("main_camera_mp")
-    bat_max = _max("battery_capacity")
-    ant_max = _max("antutu_score")
-    chg_max = _max("fast_charging_w")
-    screen_max = _max("screen_size")
-    screen_min = min((p["screen_size"] or 100) for p in phones) or 1
-    weight_max = _max("weight_g")
 
-    def score_phone(p: dict) -> float:
-        s = 0.0
-        for pr in priority_list:
-            if pr == "camera":
-                s += norm(p["main_camera_mp"], 0, cam_max)
-            elif pr == "battery":
-                s += norm(p["battery_capacity"], 0, bat_max)
-            elif pr == "performance":
-                s += norm(p["antutu_score"], 0, ant_max)
-            elif pr == "compact":
-                s += 1.0 - norm(p["screen_size"] or screen_max, screen_min, screen_max)
-            elif pr == "lightweight":
-                s += 1.0 - norm(p["weight_g"] or weight_max, 0, weight_max)
-            elif pr == "display":
-                s += norm(p["screen_size"] or 0, screen_min, screen_max) * 0.7 + 0.3
-            elif pr == "fast_charging":
-                s += norm(p["fast_charging_w"], 0, chg_max)
-            elif pr == "value":
-                spec = (
-                    (p["main_camera_mp"] or 0) / 200 +
-                    (p["battery_capacity"] or 0) / 7000 +
-                    (p["antutu_score"] or 0) / 2_000_000
-                )
-                price_norm = p["price_usd"] / 2000 if p["price_usd"] else 1
-                s += spec / max(price_norm, 0.01) / 3
-        return round((s / (len(priority_list) or 1)) * 10, 1)
+# ─── MISC STUBS ───────────────────────────────────────────────────────────────
 
-    for p in phones:
-        p["match_score"] = score_phone(p)
-
-    phones.sort(key=lambda x: x["match_score"], reverse=True)
-    return {"phones": phones[:limit], "priorities": priority_list}
+@app.post("/history/views")
+async def record_view(data: dict):
+    return {"success": True}
 
 
 # ─── HEALTH ───────────────────────────────────────────────────────────────────
@@ -744,6 +802,11 @@ async def health():
         return {"status": "ok", "db": "connected"}
     except Exception as e:
         return JSONResponse(status_code=503, content={"status": "error", "detail": str(e)})
+
+
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "Mobylite API v1.0", "docs": "/docs"}
 
 
 if __name__ == "__main__":
