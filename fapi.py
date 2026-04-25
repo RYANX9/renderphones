@@ -42,14 +42,35 @@ app.add_middleware(
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
+def _serialize_value(v):
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, (int, float, str, bool)):
+        return v
+    if isinstance(v, dict):
+        return {kk: _serialize_value(vv) for kk, vv in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_serialize_value(i) for i in v]
+    # asyncpg returns Decimal for numeric columns — cast to float
+    try:
+        import decimal
+        if isinstance(v, decimal.Decimal):
+            return float(v)
+    except Exception:
+        pass
+    # Fallback: stringify anything else (asyncpg custom types, etc.)
+    try:
+        return str(v)
+    except Exception:
+        return None
+
+
 def row_to_dict(row) -> dict:
     if row is None:
         return None
-    d = dict(row)
-    for k, v in d.items():
-        if isinstance(v, datetime):
-            d[k] = v.isoformat()
-    return d
+    return {k: _serialize_value(v) for k, v in dict(row).items()}
 
 
 def rows_to_list(rows) -> list:
@@ -407,7 +428,7 @@ async def get_phone(phone_id: int):
 
     phone = row_to_dict(row)
     phone["full_specifications"] = parse_json_safe(phone.get("full_specifications"))
-    phone["features"] = parse_json_safe(phone.get("features"))
+    # features is a native postgres ARRAY — already deserialized by asyncpg
 
     if phone.get("price_usd"):
         lo, hi = phone["price_usd"] * 0.7, phone["price_usd"] * 1.3
