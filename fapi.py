@@ -72,25 +72,11 @@ def slug_to_words(slug: str) -> str:
 
 
 def build_phone_list_select() -> str:
-    return """
-        id, model_name, brand, price_usd, main_image_url,
-        screen_size, battery_capacity, ram_options, storage_options,
-        main_camera_mp, chipset, antutu_score, amazon_link,
-        release_year, release_month, release_day, release_date_full,
-        weight_g, fast_charging_w
-    """
+    return "*"
 
 
 def build_phone_detail_select() -> str:
-    return """
-        id, model_name, brand, price_usd, main_image_url,
-        screen_size, battery_capacity, ram_options, storage_options,
-        main_camera_mp, chipset, antutu_score, amazon_link,
-        release_year, release_month, release_day, release_date_full,
-        price_original, currency, brand_link, weight_g, thickness_mm,
-        screen_resolution, fast_charging_w, video_resolution,
-        geekbench_multi, gpu_score, full_specifications, features
-    """
+    return "*"
 
 
 def compute_value_score(phone: dict, peers: list[dict]) -> float | None:
@@ -407,30 +393,40 @@ async def recommend(
 
 @app.get("/phones/{phone_id}")
 async def get_phone(phone_id: int):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"SELECT {build_phone_detail_select()} FROM phones WHERE id = $1",
-            phone_id,
-        )
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {build_phone_detail_select()} FROM phones WHERE id = $1",
+                phone_id,
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB query failed: {e}")
+
     if not row:
         raise HTTPException(status_code=404, detail="Phone not found")
 
     phone = row_to_dict(row)
     phone["full_specifications"] = parse_json_safe(phone.get("full_specifications"))
+    phone["features"] = parse_json_safe(phone.get("features"))
 
     if phone.get("price_usd"):
         lo, hi = phone["price_usd"] * 0.7, phone["price_usd"] * 1.3
-        async with pool.acquire() as conn:
-            peer_rows = await conn.fetch(
-                f"""
-                SELECT {build_phone_list_select()}
-                FROM phones
-                WHERE price_usd BETWEEN $1 AND $2 AND id != $3
-                LIMIT 50
-                """,
-                lo, hi, phone_id,
-            )
-        phone["value_score"] = compute_value_score(phone, rows_to_list(peer_rows))
+        try:
+            async with pool.acquire() as conn:
+                peer_rows = await conn.fetch(
+                    """
+                    SELECT id, model_name, brand, price_usd, antutu_score,
+                           main_camera_mp, battery_capacity, ram_options,
+                           fast_charging_w, screen_size
+                    FROM phones
+                    WHERE price_usd BETWEEN $1 AND $2 AND id != $3
+                    LIMIT 50
+                    """,
+                    lo, hi, phone_id,
+                )
+            phone["value_score"] = compute_value_score(phone, rows_to_list(peer_rows))
+        except Exception:
+            phone["value_score"] = None
     else:
         phone["value_score"] = None
 
@@ -440,10 +436,14 @@ async def get_phone(phone_id: int):
 
 @app.get("/phones/{phone_id}/similar")
 async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24)):
-    async with pool.acquire() as conn:
-        base = await conn.fetchrow(
-            "SELECT brand, price_usd FROM phones WHERE id = $1", phone_id
-        )
+    try:
+        async with pool.acquire() as conn:
+            base = await conn.fetchrow(
+                "SELECT brand, price_usd FROM phones WHERE id = $1", phone_id
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
     if not base:
         raise HTTPException(status_code=404, detail="Phone not found")
 
@@ -458,20 +458,23 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
         i += 2
 
     where = " AND ".join(conditions)
-    brand_escaped = base["brand"].replace("'", "''")
+    brand_val = (base["brand"] or "").replace("'", "''")
 
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"""
-            SELECT {build_phone_list_select()},
-                   CASE WHEN brand = '{brand_escaped}' THEN 1 ELSE 0 END AS brand_match
-            FROM phones
-            WHERE {where}
-            ORDER BY brand_match DESC, release_year DESC NULLS LAST
-            LIMIT {limit}
-            """,
-            *params,
-        )
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT *,
+                       CASE WHEN brand IS NOT NULL AND brand = '{brand_val}' THEN 1 ELSE 0 END AS brand_match
+                FROM phones
+                WHERE {where}
+                ORDER BY brand_match DESC, release_year DESC NULLS LAST
+                LIMIT {limit}
+                """,
+                *params,
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Similar query failed: {e}")
 
     results = []
     for r in rows:
@@ -708,13 +711,26 @@ async def list_categories():
 
 @app.get("/categories/{category_slug}")
 async def get_category(category_slug: str, limit: int = Query(10, ge=5, le=20)):
+    # Alias short slugs the frontend may send
+    SLUG_ALIASES = {
+        "camera": "camera-phones",
+        "battery": "battery-life",
+        "gaming": "gaming-phones",
+        "lightweight": "lightweight",
+        "compact": "compact-phones",
+        "charging": "fast-charging",
+    }
+    category_slug = SLUG_ALIASES.get(category_slug, category_slug)
     cfg = CATEGORY_CONFIG.get(category_slug)
     if not cfg:
         raise HTTPException(status_code=404, detail=f"Category '{category_slug}' not found")
 
     sql = cfg["sql"].format(cols=build_phone_list_select(), limit=limit)
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql)
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Category query failed: {e}")
 
     phones = []
     for r in rows:
