@@ -93,7 +93,16 @@ def slug_to_words(slug: str) -> str:
 
 
 def build_phone_list_select() -> str:
-    return "*"
+    # Compute Unix timestamp from year/month/day for accurate chronological sorting.
+    # Defaults: month=1, day=1 when NULL so partial dates sort to start of period.
+    return (
+        "*, "
+        "EXTRACT(EPOCH FROM MAKE_DATE("
+        "  COALESCE(release_year, 1970),"
+        "  COALESCE(release_month, 1),"
+        "  COALESCE(release_day, 1)"
+        "))::bigint AS release_ts"
+    )
 
 
 def build_phone_detail_select() -> str:
@@ -254,8 +263,22 @@ async def search_phones(
         elif chipset_tier_filter == "entry":
             conditions.append("(chipset IS NOT NULL AND LOWER(chipset) NOT LIKE '%snapdragon 8%' AND LOWER(chipset) NOT LIKE '%dimensity 9%')")
 
-    valid_sorts = {"release_year", "price_usd", "battery_capacity", "main_camera_mp", "antutu_score", "weight_g"}
-    sort_col = sort_by if sort_by in valid_sorts else "release_year"
+    TS_EXPR = (
+        "EXTRACT(EPOCH FROM MAKE_DATE("
+        "COALESCE(release_year,1970),"
+        "COALESCE(release_month,1),"
+        "COALESCE(release_day,1)))::bigint"
+    )
+    SORT_COL_MAP = {
+        "release_year": TS_EXPR,
+        "release_ts": TS_EXPR,
+        "price_usd": "price_usd",
+        "battery_capacity": "battery_capacity",
+        "main_camera_mp": "main_camera_mp",
+        "antutu_score": "antutu_score",
+        "weight_g": "weight_g",
+    }
+    sort_expr = SORT_COL_MAP.get(sort_by, TS_EXPR)
     order = "DESC" if sort_order.lower() == "desc" else "ASC"
     where = " AND ".join(conditions)
     offset = (page - 1) * page_size
@@ -267,7 +290,7 @@ async def search_phones(
             SELECT {build_phone_list_select()}
             FROM phones
             WHERE {where}
-            ORDER BY {sort_col} {order} NULLS LAST, id DESC
+            ORDER BY {sort_expr} {order} NULLS LAST, id DESC
             LIMIT {page_size} OFFSET {offset}
             """,
             *params,
@@ -284,7 +307,13 @@ async def get_trending(limit: int = Query(10, ge=1, le=20)):
             SELECT {build_phone_list_select()}
             FROM phones
             WHERE release_year IS NOT NULL AND antutu_score IS NOT NULL
-            ORDER BY release_year DESC, antutu_score DESC
+            ORDER BY
+                EXTRACT(EPOCH FROM MAKE_DATE(
+                    COALESCE(release_year,1970),
+                    COALESCE(release_month,1),
+                    COALESCE(release_day,1)
+                ))::bigint DESC,
+                antutu_score DESC
             LIMIT {limit}
             """
         )
@@ -299,7 +328,13 @@ async def get_latest(limit: int = Query(20, ge=1, le=50)):
             SELECT {build_phone_list_select()}
             FROM phones
             WHERE release_year IS NOT NULL
-            ORDER BY release_year DESC, release_month DESC NULLS LAST, release_day DESC NULLS LAST, id DESC
+            ORDER BY
+                EXTRACT(EPOCH FROM MAKE_DATE(
+                    COALESCE(release_year,1970),
+                    COALESCE(release_month,1),
+                    COALESCE(release_day,1)
+                ))::bigint DESC,
+                id DESC
             LIMIT {limit}
             """
         )
