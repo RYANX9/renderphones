@@ -520,7 +520,7 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT *,
+                SELECT {build_phone_list_select()},
                        CASE WHEN brand IS NOT NULL AND brand = '{brand_val}' THEN 1 ELSE 0 END AS brand_match
                 FROM phones
                 WHERE {where}
