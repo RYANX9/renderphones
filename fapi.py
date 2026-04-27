@@ -538,8 +538,11 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
     if not base:
         raise HTTPException(status_code=404, detail="Phone not found")
 
-    # ── 2. build parameterised query (no string interpolation of user data) ──
-    params: list = [phone_id]          # $1 = exclude self
+    # ── 2. build query with only safe parameterised values ───────────────────
+    # We do two separate queries to avoid any column-name collision:
+    # first get IDs ordered by relevance, then fetch full rows.
+
+    id_params: list = [phone_id]   # $1 = exclude self
     conditions = ["id != $1"]
     idx = 2
 
@@ -547,40 +550,61 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
         lo = base["price_usd"] * 0.7
         hi = base["price_usd"] * 1.3
         conditions.append(f"price_usd BETWEEN ${idx} AND ${idx + 1}")
-        params += [lo, hi]
+        id_params += [lo, hi]
         idx += 2
+
+    # brand param — fully parameterised, no string injection
+    id_params.append(base["brand"])   # $idx
+    brand_param_n = idx
 
     where = " AND ".join(conditions)
 
-    # brand match uses a proper parameter — no f-string injection
-    params.append(base["brand"])       # will be $idx
-    brand_param = f"${idx}"
-
     try:
         async with pool.acquire() as conn:
+            # Step A: get ordered IDs
+            id_rows = await conn.fetch(
+                f"""
+                SELECT id,
+                       CASE WHEN brand = ${brand_param_n} THEN 1 ELSE 0 END AS bm
+                FROM phones
+                WHERE {where}
+                ORDER BY bm DESC, release_year DESC NULLS LAST
+                LIMIT {limit}
+                """,
+                *id_params,
+            )
+
+            if not id_rows:
+                return {"phones": []}
+
+            ordered_ids = [r["id"] for r in id_rows]
+
+            # Step B: fetch full phone data for those IDs
             rows = await conn.fetch(
                 f"""
                 SELECT
                     id, model_name, brand, price_usd, main_image_url,
-                    release_year, main_camera_mp, battery_capacity,
+                    release_year, release_month, release_day,
+                    main_camera_mp, battery_capacity,
                     screen_size, weight_g, chipset, ram_options,
                     storage_options, fast_charging_w, antutu_score,
-                    CASE WHEN brand = {brand_param} THEN 1 ELSE 0 END AS brand_match
+                    EXTRACT(EPOCH FROM MAKE_DATE(
+                        COALESCE(release_year,1970),
+                        COALESCE(release_month,1),
+                        COALESCE(release_day,1)
+                    ))::bigint AS release_ts
                 FROM phones
-                WHERE {where}
-                ORDER BY brand_match DESC, release_year DESC NULLS LAST
-                LIMIT {limit}
+                WHERE id = ANY($1::int[])
                 """,
-                *params,
+                ordered_ids,
             )
+
+            # preserve the relevance order from Step A
+            row_map = {r["id"]: row_to_dict(r) for r in rows}
+            results = [row_map[i] for i in ordered_ids if i in row_map]
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Similar query failed: {e}")
-
-    results = []
-    for r in rows:
-        d = row_to_dict(r)
-        d.pop("brand_match", None)
-        results.append(d)
 
     return {"phones": results}
 
