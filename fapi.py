@@ -525,11 +525,23 @@ async def get_phone(phone_id: int):
 
 @app.get("/phones/{phone_id}/similar")
 async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24)):
-    # ── 1. fetch base phone ──────────────────────────────────────────────────
+    """
+    Find similar phones based on:
+    - Same chipset tier (flagship/mid/entry)
+    - Similar price range (±40%)
+    - Similar screen size (±0.5")
+    - Similar battery capacity (±20%)
+    - Prefer same brand (boost, not filter)
+    """
     try:
         async with pool.acquire() as conn:
             base = await conn.fetchrow(
-                "SELECT id, brand, price_usd FROM phones WHERE id = $1",
+                """
+                SELECT id, brand, price_usd, screen_size,
+                       battery_capacity, chipset, antutu_score,
+                       main_camera_mp, release_year
+                FROM phones WHERE id = $1
+                """,
                 phone_id,
             )
     except Exception as e:
@@ -538,76 +550,86 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
     if not base:
         raise HTTPException(status_code=404, detail="Phone not found")
 
-    # ── 2. build query with only safe parameterised values ───────────────────
-    # We do two separate queries to avoid any column-name collision:
-    # first get IDs ordered by relevance, then fetch full rows.
+    base_dict = dict(base)
 
-    id_params: list = [phone_id]   # $1 = exclude self
-    conditions = ["id != $1"]
+    # ── build similarity conditions ──────────────────────────────────────────
+    conditions = ["id != $1", "release_year >= 2020"]
+    params: list = [phone_id]
     idx = 2
 
-    if base["price_usd"]:
-        lo = base["price_usd"] * 0.7
-        hi = base["price_usd"] * 1.3
-        conditions.append(f"price_usd BETWEEN ${idx} AND ${idx + 1}")
-        id_params += [lo, hi]
+    # price range ±40% (most important filter)
+    if base_dict["price_usd"]:
+        lo = base_dict["price_usd"] * 0.60
+        hi = base_dict["price_usd"] * 1.40
+        conditions.append(f"price_usd BETWEEN ${idx} AND ${idx+1}")
+        params += [lo, hi]
         idx += 2
 
-    # brand param — fully parameterised, no string injection
-    id_params.append(base["brand"])   # $idx
-    brand_param_n = idx
+    # screen size ±0.7"
+    if base_dict["screen_size"]:
+        s_lo = base_dict["screen_size"] - 0.7
+        s_hi = base_dict["screen_size"] + 0.7
+        conditions.append(f"screen_size BETWEEN ${idx} AND ${idx+1}")
+        params += [s_lo, s_hi]
+        idx += 2
 
     where = " AND ".join(conditions)
 
+    # brand param for scoring
+    params.append(base_dict["brand"])      # $idx  → brand match bonus
+    brand_idx = idx; idx += 1
+
+    params.append(base_dict["antutu_score"] or 0)   # $idx  → perf similarity
+    antutu_idx = idx; idx += 1
+
+    params.append(base_dict["battery_capacity"] or 0)  # $idx → battery similarity
+    bat_idx = idx; idx += 1
+
     try:
         async with pool.acquire() as conn:
-            # Step A: get ordered IDs
-            id_rows = await conn.fetch(
-                f"""
-                SELECT id,
-                       CASE WHEN brand = ${brand_param_n} THEN 1 ELSE 0 END AS bm
-                FROM phones
-                WHERE {where}
-                ORDER BY bm DESC, release_year DESC NULLS LAST
-                LIMIT {limit}
-                """,
-                *id_params,
-            )
-
-            if not id_rows:
-                return {"phones": []}
-
-            ordered_ids = [r["id"] for r in id_rows]
-
-            # Step B: fetch full phone data for those IDs
+            # Score-based ordering:
+            # +3 same brand
+            # +2 antutu within 20%
+            # +1 battery within 20%
             rows = await conn.fetch(
                 f"""
                 SELECT
                     id, model_name, brand, price_usd, main_image_url,
                     release_year, release_month, release_day,
-                    main_camera_mp, battery_capacity,
-                    screen_size, weight_g, chipset, ram_options,
-                    storage_options, fast_charging_w, antutu_score,
+                    main_camera_mp, battery_capacity, screen_size,
+                    weight_g, chipset, ram_options, storage_options,
+                    fast_charging_w, antutu_score,
                     EXTRACT(EPOCH FROM MAKE_DATE(
                         COALESCE(release_year,1970),
                         COALESCE(release_month,1),
                         COALESCE(release_day,1)
-                    ))::bigint AS release_ts
+                    ))::bigint AS release_ts,
+                    (
+                        CASE WHEN brand = ${brand_idx} THEN 3 ELSE 0 END
+                        + CASE WHEN ${antutu_idx} > 0 AND antutu_score IS NOT NULL
+                               AND ABS(antutu_score - ${antutu_idx}::float) / NULLIF(${antutu_idx}::float, 0) < 0.20
+                               THEN 2 ELSE 0 END
+                        + CASE WHEN ${bat_idx} > 0 AND battery_capacity IS NOT NULL
+                               AND ABS(battery_capacity - ${bat_idx}::float) / NULLIF(${bat_idx}::float, 0) < 0.20
+                               THEN 1 ELSE 0 END
+                    ) AS similarity_score
                 FROM phones
-                WHERE id = ANY($1::int[])
+                WHERE {where}
+                ORDER BY similarity_score DESC, release_year DESC NULLS LAST
+                LIMIT {limit}
                 """,
-                ordered_ids,
+                *params,
             )
-
-            # preserve the relevance order from Step A
-            row_map = {r["id"]: row_to_dict(r) for r in rows}
-            results = [row_map[i] for i in ordered_ids if i in row_map]
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Similar query failed: {e}")
 
-    return {"phones": results}
+    results = []
+    for r in rows:
+        d = row_to_dict(r)
+        d.pop("similarity_score", None)
+        results.append(d)
 
+    return {"phones": results}
 
 @app.get("/phones/{phone_id}/stats")
 async def get_phone_stats(phone_id: int):
