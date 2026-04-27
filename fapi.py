@@ -527,11 +527,11 @@ async def get_phone(phone_id: int):
 async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24)):
     """
     Find similar phones based on:
-    - Same chipset tier (flagship/mid/entry)
     - Similar price range (±40%)
-    - Similar screen size (±0.5")
+    - Similar screen size (±0.7")
     - Similar battery capacity (±20%)
-    - Prefer same brand (boost, not filter)
+    - Similar AnTuTu performance (±20%)
+    - Prefer same brand (scoring bonus)
     """
     try:
         async with pool.acquire() as conn:
@@ -550,47 +550,46 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
     if not base:
         raise HTTPException(status_code=404, detail="Phone not found")
 
-    base_dict = dict(base)
+    # ── cast every Decimal to float up front ────────────────────────────────
+    price_usd        = float(base["price_usd"])        if base["price_usd"]        is not None else None
+    screen_size      = float(base["screen_size"])      if base["screen_size"]      is not None else None
+    battery_capacity = float(base["battery_capacity"]) if base["battery_capacity"] is not None else None
+    antutu_score     = float(base["antutu_score"])     if base["antutu_score"]     is not None else None
+    brand            = base["brand"]
 
-    # ── build similarity conditions ──────────────────────────────────────────
+    # ── build WHERE conditions ───────────────────────────────────────────────
     conditions = ["id != $1", "release_year >= 2020"]
     params: list = [phone_id]
     idx = 2
 
-    # price range ±40% (most important filter)
-    if base_dict["price_usd"]:
-        lo = base_dict["price_usd"] * 0.60
-        hi = base_dict["price_usd"] * 1.40
-        conditions.append(f"price_usd BETWEEN ${idx} AND ${idx+1}")
+    if price_usd is not None:
+        lo = price_usd * 0.60
+        hi = price_usd * 1.40
+        conditions.append(f"price_usd BETWEEN ${idx} AND ${idx + 1}")
         params += [lo, hi]
         idx += 2
 
-    # screen size ±0.7"
-    if base_dict["screen_size"]:
-        s_lo = base_dict["screen_size"] - 0.7
-        s_hi = base_dict["screen_size"] + 0.7
-        conditions.append(f"screen_size BETWEEN ${idx} AND ${idx+1}")
+    if screen_size is not None:
+        s_lo = screen_size - 0.7
+        s_hi = screen_size + 0.7
+        conditions.append(f"screen_size BETWEEN ${idx} AND ${idx + 1}")
         params += [s_lo, s_hi]
         idx += 2
 
     where = " AND ".join(conditions)
 
-    # brand param for scoring
-    params.append(base_dict["brand"])      # $idx  → brand match bonus
+    # scoring params
+    params.append(brand)                        # brand match  → $idx
     brand_idx = idx; idx += 1
 
-    params.append(base_dict["antutu_score"] or 0)   # $idx  → perf similarity
+    params.append(antutu_score or 0.0)          # perf match   → $idx
     antutu_idx = idx; idx += 1
 
-    params.append(base_dict["battery_capacity"] or 0)  # $idx → battery similarity
+    params.append(battery_capacity or 0.0)      # battery match → $idx
     bat_idx = idx; idx += 1
 
     try:
         async with pool.acquire() as conn:
-            # Score-based ordering:
-            # +3 same brand
-            # +2 antutu within 20%
-            # +1 battery within 20%
             rows = await conn.fetch(
                 f"""
                 SELECT
@@ -600,18 +599,28 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
                     weight_g, chipset, ram_options, storage_options,
                     fast_charging_w, antutu_score,
                     EXTRACT(EPOCH FROM MAKE_DATE(
-                        COALESCE(release_year,1970),
-                        COALESCE(release_month,1),
-                        COALESCE(release_day,1)
+                        COALESCE(release_year, 1970),
+                        COALESCE(release_month, 1),
+                        COALESCE(release_day, 1)
                     ))::bigint AS release_ts,
                     (
                         CASE WHEN brand = ${brand_idx} THEN 3 ELSE 0 END
-                        + CASE WHEN ${antutu_idx} > 0 AND antutu_score IS NOT NULL
-                               AND ABS(antutu_score - ${antutu_idx}::float) / NULLIF(${antutu_idx}::float, 0) < 0.20
-                               THEN 2 ELSE 0 END
-                        + CASE WHEN ${bat_idx} > 0 AND battery_capacity IS NOT NULL
-                               AND ABS(battery_capacity - ${bat_idx}::float) / NULLIF(${bat_idx}::float, 0) < 0.20
-                               THEN 1 ELSE 0 END
+                        +
+                        CASE
+                            WHEN ${antutu_idx}::float > 0
+                             AND antutu_score IS NOT NULL
+                             AND ABS(antutu_score::float - ${antutu_idx}::float)
+                                 / NULLIF(${antutu_idx}::float, 0) < 0.20
+                            THEN 2 ELSE 0
+                        END
+                        +
+                        CASE
+                            WHEN ${bat_idx}::float > 0
+                             AND battery_capacity IS NOT NULL
+                             AND ABS(battery_capacity::float - ${bat_idx}::float)
+                                 / NULLIF(${bat_idx}::float, 0) < 0.20
+                            THEN 1 ELSE 0
+                        END
                     ) AS similarity_score
                 FROM phones
                 WHERE {where}
@@ -630,6 +639,7 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
         results.append(d)
 
     return {"phones": results}
+    
 
 @app.get("/phones/{phone_id}/stats")
 async def get_phone_stats(phone_id: int):
