@@ -369,23 +369,37 @@ async def get_latest(limit: int = Query(20, ge=1, le=50)):
 
 @app.get("/phones/compare")
 async def compare_phones(
-    ids: str = Query(..., description="Comma-separated phone IDs, 2-4")
+    ids: Optional[str] = Query(None, description="Comma-separated phone IDs, 2-4"),
+    slugs: Optional[str] = Query(None, description="Comma-separated phone slugs"),
 ):
-    try:
-        id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
-    except ValueError:
-        raise HTTPException(status_code=400, detail="ids must be comma-separated integers")
+    if not ids and not slugs:
+        raise HTTPException(status_code=400, detail="Provide ids or slugs")
 
-    if len(id_list) < 2:
-        raise HTTPException(status_code=400, detail="At least 2 phone IDs required")
-    if len(id_list) > 4:
-        raise HTTPException(status_code=400, detail="Maximum 4 phones")
-
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"SELECT {build_phone_detail_select()} FROM phones WHERE id = ANY($1::int[])",
-            id_list,
-        )
+    if slugs:
+        slug_list = [s.strip() for s in slugs.split(",") if s.strip()]
+        if len(slug_list) > 4:
+            raise HTTPException(status_code=400, detail="Maximum 4 phones")
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT {build_phone_detail_select()} FROM phones WHERE slug = ANY($1::text[])",
+                slug_list,
+            )
+        order_key, key_field = slug_list, "slug"
+    else:
+        try:
+            id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="ids must be comma-separated integers")
+        if len(id_list) < 2:
+            raise HTTPException(status_code=400, detail="At least 2 phone IDs required")
+        if len(id_list) > 4:
+            raise HTTPException(status_code=400, detail="Maximum 4 phones")
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT {build_phone_detail_select()} FROM phones WHERE id = ANY($1::int[])",
+                id_list,
+            )
+        order_key, key_field = id_list, "id"
 
     phones = []
     for r in rows:
@@ -394,9 +408,8 @@ async def compare_phones(
         d["chipset_tier"] = chipset_tier(d.get("chipset"))
         phones.append(d)
 
-    phone_map = {p["id"]: p for p in phones}
-    return {"phones": [phone_map[i] for i in id_list if i in phone_map]}
-
+    phone_map = {p[key_field]: p for p in phones}
+    return {"phones": [phone_map[k] for k in order_key if k in phone_map]}
 
 @app.get("/phones/recommend")
 async def recommend(
