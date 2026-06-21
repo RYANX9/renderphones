@@ -789,192 +789,102 @@ async def get_brand_phones(
 # {cols} expands to build_phone_list_select() output (*, release_ts computed col)
 # {limit} expands to the requested result count
 
+def build_category_sql(score_expr: str, where_clause: str) -> str:
+    return f"""
+        WITH base AS (
+            SELECT {{cols}},
+                ({score_expr}) AS raw_score
+            FROM phones
+            WHERE {where_clause}
+        ),
+        top_n AS (
+            SELECT * FROM base ORDER BY raw_score DESC LIMIT {{limit}}
+        )
+        SELECT *,
+            10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0) AS category_score
+        FROM top_n
+        ORDER BY raw_score DESC
+    """
+
+
 CATEGORY_CONFIG = {
     "camera-phones": {
         "title": "Best Camera Phones",
         "description": "Multi-factor ranking: main sensor resolution (40%), AI chip performance (40%), and fast charging (20%).",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    (
-                        COALESCE(main_camera_mp, 0)::float * 0.40
-                        + COALESCE(antutu_score, 0)::float / 200000.0 * 2.0
-                        + COALESCE(fast_charging_w, 0)::float * 0.05
-                    ) AS raw_score
-                FROM phones
-                WHERE main_camera_mp IS NOT NULL
-                  AND screen_size >= 5.5
-                  AND release_year >= 2023
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "sql": build_category_sql(
+            score_expr="""
+                COALESCE(main_camera_mp, 0)::float * 0.40
+                + COALESCE(antutu_score, 0)::float / 200000.0 * 2.0
+                + COALESCE(fast_charging_w, 0)::float * 0.05
+            """,
+            where_clause="main_camera_mp IS NOT NULL AND screen_size >= 5.5 AND release_year >= 2023",
+        ),
     },
     "battery-life": {
         "title": "Best Battery Life",
         "description": "Ranked by raw battery capacity. 5000mAh+ on efficient modern chips dominate.",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    COALESCE(battery_capacity, 0)::float AS raw_score
-                FROM phones
-                WHERE battery_capacity IS NOT NULL
-                  AND screen_size >= 5.5
-                  AND release_year >= 2023
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "sql": build_category_sql(
+            score_expr="COALESCE(battery_capacity, 0)::float",
+            where_clause="battery_capacity IS NOT NULL AND screen_size >= 5.5 AND release_year >= 2023",
+        ),
     },
     "gaming-phones": {
         "title": "Best Gaming Phones",
         "description": "Top AnTuTu benchmark scores from 2024 and newer. Snapdragon 8 Elite and Dimensity 9400+ class chips only.",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    COALESCE(antutu_score, 0)::float AS raw_score
-                FROM phones
-                WHERE antutu_score IS NOT NULL
-                  AND screen_size >= 5.5
-                  AND release_year >= 2024
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "sql": build_category_sql(
+            score_expr="COALESCE(antutu_score, 0)::float",
+            where_clause="antutu_score IS NOT NULL AND screen_size >= 5.5 AND release_year >= 2024",
+        ),
     },
     "under-300": {
         "title": "Best Phones Under $300",
         "description": "Maximum specs per dollar under $300. Composite of battery, camera MP, and performance.",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    (
-                        COALESCE(battery_capacity, 0)::float / 500.0
-                        + COALESCE(main_camera_mp, 0)::float / 10.0
-                        + COALESCE(antutu_score, 0)::float / 100000.0
-                    ) AS raw_score
-                FROM phones
-                WHERE price_usd <= 300
-                  AND price_usd > 0
-                  AND screen_size >= 5.5
-                  AND release_year >= 2022
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "sql": build_category_sql(
+            score_expr="""
+                COALESCE(battery_capacity, 0)::float / 500.0
+                + COALESCE(main_camera_mp, 0)::float / 10.0
+                + COALESCE(antutu_score, 0)::float / 100000.0
+            """,
+            where_clause="price_usd <= 300 AND price_usd > 0 AND screen_size >= 5.5 AND release_year >= 2022",
+        ),
     },
     "under-500": {
         "title": "Best Phones Under $500",
         "description": "The mid-range sweet spot. Near-flagship specs at half the price. Scored by specs composite.",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    (
-                        COALESCE(battery_capacity, 0)::float / 500.0
-                        + COALESCE(main_camera_mp, 0)::float / 10.0
-                        + COALESCE(antutu_score, 0)::float / 100000.0
-                    ) AS raw_score
-                FROM phones
-                WHERE price_usd <= 500
-                  AND price_usd > 0
-                  AND screen_size >= 5.5
-                  AND release_year >= 2022
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "sql": build_category_sql(
+            score_expr="""
+                COALESCE(battery_capacity, 0)::float / 500.0
+                + COALESCE(main_camera_mp, 0)::float / 10.0
+                + COALESCE(antutu_score, 0)::float / 100000.0
+            """,
+            where_clause="price_usd <= 500 AND price_usd > 0 AND screen_size >= 5.5 AND release_year >= 2022",
+        ),
     },
     "lightweight": {
         "title": "Lightest Smartphones",
-        "description": "Modern smartphones (5.5\"+ screen) between 100g–185g. Feature phones excluded. Sorted by weight ascending.",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    (200.0 - COALESCE(weight_g, 200))::float AS raw_score
-                FROM phones
-                WHERE weight_g IS NOT NULL
-                  AND weight_g BETWEEN 100 AND 185
-                  AND screen_size >= 5.5
-                  AND release_year >= 2023
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "description": "Modern smartphones (5.5\"+ screen) between 100g\u2013185g. Feature phones excluded. Sorted by weight ascending.",
+        "sql": build_category_sql(
+            score_expr="(200.0 - COALESCE(weight_g, 200))::float",
+            where_clause="weight_g IS NOT NULL AND weight_g BETWEEN 100 AND 185 AND screen_size >= 5.5 AND release_year >= 2023",
+        ),
     },
     "compact-phones": {
         "title": "Best Compact Phones",
-        "description": "Smartphones with screens between 5.0\"–6.3\". Ranked by AnTuTu performance.",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    COALESCE(antutu_score, 0)::float AS raw_score
-                FROM phones
-                WHERE screen_size <= 6.3
-                  AND screen_size >= 5.0
-                  AND release_year >= 2023
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "description": "Smartphones with screens between 5.0\"\u20136.3\". Ranked by AnTuTu performance.",
+        "sql": build_category_sql(
+            score_expr="COALESCE(antutu_score, 0)::float",
+            where_clause="screen_size <= 6.3 AND screen_size >= 5.0 AND release_year >= 2023",
+        ),
     },
     "fast-charging": {
         "title": "Fastest Charging Phones",
         "description": "Ranked by maximum wired charging wattage. 30W minimum to qualify. 90W+ is the 2026 premium benchmark.",
-        "sql": """
-            WITH base AS (
-                SELECT {cols},
-                    COALESCE(fast_charging_w, 0)::float AS raw_score
-                FROM phones
-                WHERE fast_charging_w >= 30
-                  AND screen_size >= 5.5
-                  AND release_year >= 2023
-            ),
-            top_n AS (
-                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
-            )
-            SELECT *,
-                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
-            FROM top_n
-            ORDER BY raw_score DESC
-        """,
+        "sql": build_category_sql(
+            score_expr="COALESCE(fast_charging_w, 0)::float",
+            where_clause="fast_charging_w >= 30 AND screen_size >= 5.5 AND release_year >= 2023",
+        ),
     },
 }
-
 
 @app.get("/categories")
 async def list_categories():
