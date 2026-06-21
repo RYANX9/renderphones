@@ -40,8 +40,6 @@ app.add_middleware(
 )
 
 
-# ─── Global exception handler so CORS headers survive 500s ───────────────────
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
@@ -154,16 +152,30 @@ def chipset_tier(chipset: str | None) -> str:
         return "unknown"
     c = chipset.lower()
     flagship_patterns = [
-        r"snapdragon 8 gen \d", r"snapdragon 8 elite", r"snapdragon 8s gen \d",
-        r"dimensity 9\d{3}", r"exynos 2\d{3}", r"apple a1[4-9]",
-        r"apple a\d+ pro", r"tensor g[3-9]", r"kirin 99",
+        r"snapdragon 8 gen [1-9]",
+        r"snapdragon 8s gen [1-9]",
+        r"snapdragon 8 elite",
+        r"snapdragon 8s elite",
+        r"dimensity 9[0-9]{3}",
+        r"exynos 2[0-9]{3}",
+        r"apple a1[4-9]",
+        r"apple a[2-9][0-9]",
+        r"apple a\d+ bionic",
+        r"apple a\d+ pro",
+        r"tensor g[3-9]",
+        r"kirin 9[0-9]{3}",
     ]
     for pat in flagship_patterns:
         if re.search(pat, c):
             return "flagship"
     mid_patterns = [
-        r"snapdragon 7", r"snapdragon 6", r"dimensity 8\d{2}",
-        r"dimensity 7\d{2}", r"exynos 1\d{3}", r"kirin 8",
+        r"snapdragon 7",
+        r"snapdragon 6",
+        r"dimensity 8[0-9]{2,3}",
+        r"dimensity 7[0-9]{2,3}",
+        r"exynos 1[0-9]{3}",
+        r"kirin 8[0-9]{2}",
+        r"tensor g[12]",
     ]
     for pat in mid_patterns:
         if re.search(pat, c):
@@ -271,11 +283,11 @@ async def search_phones(
     if chipset_tier_filter:
         if chipset_tier_filter == "flagship":
             conditions.append(
-                "(LOWER(chipset) ~ 'snapdragon 8 gen|snapdragon 8 elite|dimensity 9[0-9]{3}|exynos 2[0-9]{3}|apple a1[4-9]|tensor g[3-9]')"
+                "(LOWER(chipset) ~ 'snapdragon 8 gen [1-9]|snapdragon 8 elite|snapdragon 8s elite|snapdragon 8s gen [1-9]|dimensity 9[0-9]{3}|exynos 2[0-9]{3}|apple a1[4-9]|apple a[2-9][0-9]|tensor g[3-9]|kirin 9[0-9]{3}')"
             )
         elif chipset_tier_filter == "mid":
             conditions.append(
-                "(LOWER(chipset) ~ 'snapdragon [67]|dimensity [78][0-9]{2}|exynos 1[0-9]{3}')"
+                "(LOWER(chipset) ~ 'snapdragon [67]|dimensity [78][0-9]{2,3}|exynos 1[0-9]{3}|kirin 8[0-9]{2}|tensor g[12]')"
             )
         elif chipset_tier_filter == "entry":
             conditions.append(
@@ -538,14 +550,6 @@ async def get_phone(phone_id: int):
 
 @app.get("/phones/{phone_id}/similar")
 async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24)):
-    """
-    Find similar phones based on:
-    - Similar price range (±40%)
-    - Similar screen size (±0.7")
-    - Similar battery capacity (±20%)
-    - Similar AnTuTu performance (±20%)
-    - Prefer same brand (scoring bonus)
-    """
     try:
         async with pool.acquire() as conn:
             base = await conn.fetchrow(
@@ -563,14 +567,12 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
     if not base:
         raise HTTPException(status_code=404, detail="Phone not found")
 
-    # ── cast every Decimal to float up front ────────────────────────────────
     price_usd        = float(base["price_usd"])        if base["price_usd"]        is not None else None
     screen_size      = float(base["screen_size"])      if base["screen_size"]      is not None else None
     battery_capacity = float(base["battery_capacity"]) if base["battery_capacity"] is not None else None
     antutu_score     = float(base["antutu_score"])     if base["antutu_score"]     is not None else None
     brand            = base["brand"]
 
-    # ── build WHERE conditions ───────────────────────────────────────────────
     conditions = ["id != $1", "release_year >= 2020"]
     params: list = [phone_id]
     idx = 2
@@ -591,14 +593,13 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
 
     where = " AND ".join(conditions)
 
-    # scoring params
-    params.append(brand)                        # brand match  → $idx
+    params.append(brand)
     brand_idx = idx; idx += 1
 
-    params.append(antutu_score or 0.0)          # perf match   → $idx
+    params.append(antutu_score or 0.0)
     antutu_idx = idx; idx += 1
 
-    params.append(battery_capacity or 0.0)      # battery match → $idx
+    params.append(battery_capacity or 0.0)
     bat_idx = idx; idx += 1
 
     try:
@@ -652,7 +653,7 @@ async def get_similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=24))
         results.append(d)
 
     return {"phones": results}
-    
+
 
 @app.get("/phones/{phone_id}/stats")
 async def get_phone_stats(phone_id: int):
@@ -779,97 +780,197 @@ async def get_brand_phones(
 
 
 # ─── CATEGORIES ───────────────────────────────────────────────────────────────
+#
+# All category queries:
+#   - Restrict to screen_size >= 5.5 to exclude feature phones
+#   - Use CTEs to normalize category_score to 0–10 (top phone always = 10.0)
+#   - Updated year thresholds for 2024–2026 hardware
+#
+# {cols} expands to build_phone_list_select() output (*, release_ts computed col)
+# {limit} expands to the requested result count
 
 CATEGORY_CONFIG = {
     "camera-phones": {
         "title": "Best Camera Phones",
-        "description": "Ranked by main sensor resolution and processing power.",
+        "description": "Multi-factor ranking: main sensor resolution (40%), AI chip performance (40%), and fast charging (20%).",
         "sql": """
-            SELECT {cols},
-                   (COALESCE(main_camera_mp, 0) * 0.3 + COALESCE(antutu_score, 0) / 200000.0 * 0.1) AS category_score
-            FROM phones
-            WHERE main_camera_mp IS NOT NULL AND release_year >= 2022
-            ORDER BY main_camera_mp DESC, antutu_score DESC NULLS LAST
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    (
+                        COALESCE(main_camera_mp, 0)::float * 0.40
+                        + COALESCE(antutu_score, 0)::float / 200000.0 * 2.0
+                        + COALESCE(fast_charging_w, 0)::float * 0.05
+                    ) AS raw_score
+                FROM phones
+                WHERE main_camera_mp IS NOT NULL
+                  AND screen_size >= 5.5
+                  AND release_year >= 2023
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
     "battery-life": {
         "title": "Best Battery Life",
-        "description": "Highest battery capacity phones.",
+        "description": "Ranked by raw battery capacity. 5000mAh+ on efficient modern chips dominate.",
         "sql": """
-            SELECT {cols}, battery_capacity::float AS category_score
-            FROM phones
-            WHERE battery_capacity IS NOT NULL AND release_year >= 2022
-            ORDER BY battery_capacity DESC
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    COALESCE(battery_capacity, 0)::float AS raw_score
+                FROM phones
+                WHERE battery_capacity IS NOT NULL
+                  AND screen_size >= 5.5
+                  AND release_year >= 2023
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
     "gaming-phones": {
         "title": "Best Gaming Phones",
-        "description": "Top AnTuTu scores — the fastest chips available.",
+        "description": "Top AnTuTu benchmark scores from 2024 and newer. Snapdragon 8 Elite and Dimensity 9400+ class chips only.",
         "sql": """
-            SELECT {cols}, COALESCE(antutu_score, 0)::float AS category_score
-            FROM phones
-            WHERE antutu_score IS NOT NULL AND release_year >= 2023
-            ORDER BY antutu_score DESC
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    COALESCE(antutu_score, 0)::float AS raw_score
+                FROM phones
+                WHERE antutu_score IS NOT NULL
+                  AND screen_size >= 5.5
+                  AND release_year >= 2024
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
     "under-300": {
         "title": "Best Phones Under $300",
-        "description": "Best specs-per-dollar under $300.",
+        "description": "Maximum specs per dollar under $300. Composite of battery, camera MP, and performance.",
         "sql": """
-            SELECT {cols},
-                   (COALESCE(battery_capacity, 0) / 500.0 + COALESCE(main_camera_mp, 0) / 10.0 + COALESCE(antutu_score, 0) / 100000.0) AS category_score
-            FROM phones
-            WHERE price_usd <= 300 AND price_usd > 0 AND release_year >= 2022
-            ORDER BY category_score DESC
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    (
+                        COALESCE(battery_capacity, 0)::float / 500.0
+                        + COALESCE(main_camera_mp, 0)::float / 10.0
+                        + COALESCE(antutu_score, 0)::float / 100000.0
+                    ) AS raw_score
+                FROM phones
+                WHERE price_usd <= 300
+                  AND price_usd > 0
+                  AND screen_size >= 5.5
+                  AND release_year >= 2022
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
     "under-500": {
         "title": "Best Phones Under $500",
-        "description": "Best value in the mid-range.",
+        "description": "The mid-range sweet spot. Near-flagship specs at half the price. Scored by specs composite.",
         "sql": """
-            SELECT {cols},
-                   (COALESCE(battery_capacity, 0) / 500.0 + COALESCE(main_camera_mp, 0) / 10.0 + COALESCE(antutu_score, 0) / 100000.0) AS category_score
-            FROM phones
-            WHERE price_usd <= 500 AND price_usd > 0 AND release_year >= 2022
-            ORDER BY category_score DESC
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    (
+                        COALESCE(battery_capacity, 0)::float / 500.0
+                        + COALESCE(main_camera_mp, 0)::float / 10.0
+                        + COALESCE(antutu_score, 0)::float / 100000.0
+                    ) AS raw_score
+                FROM phones
+                WHERE price_usd <= 500
+                  AND price_usd > 0
+                  AND screen_size >= 5.5
+                  AND release_year >= 2022
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
     "lightweight": {
-        "title": "Lightest Phones",
-        "description": "Phones under 200g.",
+        "title": "Lightest Smartphones",
+        "description": "Modern smartphones (5.5\"+ screen) between 100g–185g. Feature phones excluded. Sorted by weight ascending.",
         "sql": """
-            SELECT {cols}, (1000.0 - COALESCE(weight_g, 999)) AS category_score
-            FROM phones
-            WHERE weight_g IS NOT NULL AND weight_g <= 200 AND release_year >= 2022
-            ORDER BY weight_g ASC
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    (200.0 - COALESCE(weight_g, 200))::float AS raw_score
+                FROM phones
+                WHERE weight_g IS NOT NULL
+                  AND weight_g BETWEEN 100 AND 185
+                  AND screen_size >= 5.5
+                  AND release_year >= 2023
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
     "compact-phones": {
         "title": "Best Compact Phones",
-        "description": "Screen size under 6.3 inches.",
+        "description": "Smartphones with screens between 5.0\"–6.3\". Ranked by AnTuTu performance.",
         "sql": """
-            SELECT {cols}, COALESCE(antutu_score, 0)::float AS category_score
-            FROM phones
-            WHERE screen_size <= 6.3 AND screen_size IS NOT NULL AND release_year >= 2022
-            ORDER BY antutu_score DESC NULLS LAST, release_year DESC
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    COALESCE(antutu_score, 0)::float AS raw_score
+                FROM phones
+                WHERE screen_size <= 6.3
+                  AND screen_size >= 5.0
+                  AND release_year >= 2023
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC NULLS LAST LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
     "fast-charging": {
         "title": "Fastest Charging Phones",
-        "description": "Wired charging speed in watts.",
+        "description": "Ranked by maximum wired charging wattage. 30W minimum to qualify. 90W+ is the 2026 premium benchmark.",
         "sql": """
-            SELECT {cols}, COALESCE(fast_charging_w, 0)::float AS category_score
-            FROM phones
-            WHERE fast_charging_w IS NOT NULL AND fast_charging_w > 0 AND release_year >= 2022
-            ORDER BY fast_charging_w DESC
-            LIMIT {limit}
+            WITH base AS (
+                SELECT {cols},
+                    COALESCE(fast_charging_w, 0)::float AS raw_score
+                FROM phones
+                WHERE fast_charging_w >= 30
+                  AND screen_size >= 5.5
+                  AND release_year >= 2023
+            ),
+            top_n AS (
+                SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}
+            )
+            SELECT *,
+                ROUND(10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0), 2) AS category_score
+            FROM top_n
+            ORDER BY raw_score DESC
         """,
     },
 }
@@ -888,12 +989,12 @@ async def list_categories():
 @app.get("/categories/{category_slug}")
 async def get_category(category_slug: str, limit: int = Query(10, ge=5, le=20)):
     SLUG_ALIASES = {
-        "camera":     "camera-phones",
-        "battery":    "battery-life",
-        "gaming":     "gaming-phones",
+        "camera":      "camera-phones",
+        "battery":     "battery-life",
+        "gaming":      "gaming-phones",
         "lightweight": "lightweight",
-        "compact":    "compact-phones",
-        "charging":   "fast-charging",
+        "compact":     "compact-phones",
+        "charging":    "fast-charging",
     }
     category_slug = SLUG_ALIASES.get(category_slug, category_slug)
     cfg = CATEGORY_CONFIG.get(category_slug)
@@ -910,6 +1011,8 @@ async def get_category(category_slug: str, limit: int = Query(10, ge=5, le=20)):
     phones = []
     for r in rows:
         d = row_to_dict(r)
+        # pop raw_score (internal scoring artifact), keep category_score
+        d.pop("raw_score", None)
         d["category_score"] = round(float(d.pop("category_score", 0) or 0), 2)
         phones.append(d)
 
@@ -957,7 +1060,7 @@ async def get_filter_stats():
         "screen_range":   {"min": float(stats["min_screen"] or 4.0),  "max": float(stats["max_screen"] or 7.5)},
         "weight_range":   {"min": int(stats["min_weight"] or 100),    "max": int(stats["max_weight"] or 300)},
         "charging_range": {"min": int(stats["min_charging"] or 5),    "max": int(stats["max_charging"] or 240)},
-        "year_range":     {"min": int(stats["min_year"] or 2018),     "max": int(stats["max_year"] or 2025)},
+        "year_range":     {"min": int(stats["min_year"] or 2018),     "max": int(stats["max_year"] or 2026)},
         "brands":         [{"brand": r["brand"], "count": r["count"]} for r in brands],
         "ram_options":    [r["ram"] for r in rams if r["ram"]],
         "release_years":  [r["release_year"] for r in years],
