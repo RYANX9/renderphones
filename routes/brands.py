@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 # CORRECT - matches your actual structure
 from cache import cached
 from config import get_settings
+settings = get_settings()  
 from database import get_pool, row_to_dict, rows_to_list, PHONE_LIST_SELECT, RELEASE_TS_EXPR
 from utils.query import build_search_where, resolve_sort, parse_json_safe
 from utils.scoring import chipset_tier, compute_value_score
