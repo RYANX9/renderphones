@@ -7,9 +7,9 @@ import unicodedata
 from fastapi import APIRouter
 from fastapi.responses import Response, JSONResponse
 
-from app.cache import cached
-from app.config import settings
-from app.database import get_pool
+from cache import cached
+from config import settings
+from database import get_pool
 
 logger = logging.getLogger(__name__)
 
