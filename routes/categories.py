@@ -17,30 +17,21 @@ router = APIRouter(prefix="/categories", tags=["categories"])
 # ── Category SQL builder ──────────────────────────────────────────────────────
 
 def _category_sql(score_expr: str, where_clause: str) -> str:
-    """
-    CTE that:
-    1. Scores every qualifying phone with a raw float.
-    2. Takes the top {limit} rows.
-    3. Normalises scores so the top phone always equals 10.0.
-    """
-    return f"""
-        WITH base AS (
-            SELECT {{{cols}}},
-                   ({score_expr}) AS raw_score
-            FROM   phones
-            WHERE  {where_clause}
-        ),
-        top_n AS (
-            SELECT *
-            FROM   base
-            ORDER  BY raw_score DESC
-            LIMIT  {{limit}}
-        )
-        SELECT *,
-               10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0) AS category_score
-        FROM   top_n
-        ORDER  BY raw_score DESC
-    """
+    return (
+        "WITH base AS ("
+        "  SELECT {cols},"
+        "  (" + score_expr + ") AS raw_score"
+        "  FROM phones"
+        "  WHERE " + where_clause +
+        "),"
+        "top_n AS ("
+        "  SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}"
+        "),"
+        "SELECT *,"
+        "  10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0) AS category_score"
+        "FROM top_n"
+        "ORDER BY raw_score DESC"
+    )
 
 
 # ── Category definitions ──────────────────────────────────────────────────────
