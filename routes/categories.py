@@ -4,9 +4,9 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.cache import cached
-from app.config import settings
-from app.database import get_pool, row_to_dict, rows_to_list, PHONE_LIST_SELECT
+from cache import cached
+from config import settings
+from database import get_pool, row_to_dict, rows_to_list, PHONE_LIST_SELECT
 
 logger = logging.getLogger(__name__)
 
