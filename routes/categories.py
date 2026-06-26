@@ -5,7 +5,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from cache import cached
-from config import settings
+from config import get_settings
+settings = get_settings()  
 from database import get_pool, row_to_dict, rows_to_list, PHONE_LIST_SELECT
 
 logger = logging.getLogger(__name__)
