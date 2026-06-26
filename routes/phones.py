@@ -5,14 +5,14 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.cache import cached
-from app.config import settings
-from app.database import (
+from cache import cached
+from config import settings
+from database import (
     get_pool, row_to_dict, rows_to_list,
     PHONE_LIST_SELECT, RELEASE_TS_EXPR,
 )
-from app.utils.query import build_search_where, resolve_sort, parse_json_safe
-from app.utils.scoring import chipset_tier, compute_value_score
+from utils.query import build_search_where, resolve_sort, parse_json_safe
+from utils.scoring import chipset_tier, compute_value_score
 
 logger = logging.getLogger(__name__)
 
