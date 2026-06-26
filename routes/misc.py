@@ -8,7 +8,8 @@ from fastapi import APIRouter
 from fastapi.responses import Response, JSONResponse
 
 from cache import cached
-from config import settings
+from config import get_settings
+settings = get_settings()  
 from database import get_pool
 
 logger = logging.getLogger(__name__)
