@@ -6,9 +6,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import get_settings
-from app.database import create_pool, close_pool
-from app.middleware import RequestContextMiddleware, RateLimitMiddleware
+from config import get_settings
+from database import create_pool, close_pool
+from middleware import RequestContextMiddleware, RateLimitMiddleware
 from routes.phones import router as phones_router
 from routes.brands import router as brands_router
 from routes.categories import router as categories_router
