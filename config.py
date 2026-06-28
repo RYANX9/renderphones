@@ -12,24 +12,19 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Required — no default so startup fails fast if missing
     database_url: str
 
-    # Pool
     db_pool_min: int = 2
     db_pool_max: int = 10
     db_command_timeout: float = 30.0
 
-    # Cache TTLs (seconds)
     cache_ttl_trending: int = 900
     cache_ttl_stable: int = 3_600
     cache_ttl_phone_detail: int = 86_400
 
-    # Rate limiting
     rate_limit_requests: int = 120
     rate_limit_window: int = 60
 
-    # Comma-separated allowed CORS origins
     cors_origins: str = "https://mobylite.vercel.app"
 
     debug: bool = False
@@ -43,3 +38,7 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+# Module-level singleton — routes import this directly: `from config import settings`
+settings = get_settings()
