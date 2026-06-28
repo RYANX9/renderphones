@@ -5,8 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from cache import cached
-from config import get_settings
-settings = get_settings()  
+from config import settings
 from database import get_pool, row_to_dict, rows_to_list, PHONE_LIST_SELECT
 
 logger = logging.getLogger(__name__)
@@ -14,30 +13,34 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/categories", tags=["categories"])
 
 
-# ── Category SQL builder ──────────────────────────────────────────────────────
-
 def _category_sql(score_expr: str, where_clause: str) -> str:
-    return (
-        "WITH base AS ("
-        "  SELECT {cols},"
-        "  (" + score_expr + ") AS raw_score"
-        "  FROM phones"
-        "  WHERE " + where_clause +
-        "),"
-        "top_n AS ("
-        "  SELECT * FROM base ORDER BY raw_score DESC LIMIT {limit}"
-        "),"
-        "SELECT *,"
-        "  10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0) AS category_score"
-        "FROM top_n"
-        "ORDER BY raw_score DESC"
-    )
+    """
+    Builds a CTE template string with two deferred placeholders:
+      {cols}  — filled with PHONE_LIST_SELECT at request time
+      {limit} — filled with the limit param at request time
 
+    score_expr and where_clause are baked in at definition time (f-string).
+    {{cols}} and {{limit}} survive as literal {cols}/{limit} for .format().
+    """
+    return f"""
+        WITH base AS (
+            SELECT {{cols}},
+                   ({score_expr}) AS raw_score
+            FROM   phones
+            WHERE  {where_clause}
+        ),
+        top_n AS (
+            SELECT *
+            FROM   base
+            ORDER  BY raw_score DESC
+            LIMIT  {{limit}}
+        )
+        SELECT *,
+               10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0) AS category_score
+        FROM   top_n
+        ORDER  BY raw_score DESC
+    """
 
-# ── Category definitions ──────────────────────────────────────────────────────
-# Each entry: title, description, sql template (uses .format(cols=..., limit=...))
-# SQL templates are built once at import time; only {cols} and {limit} are
-# substituted at request time from safe, server-controlled values.
 
 CATEGORY_CONFIG: dict[str, dict] = {
     "camera-phones": {
@@ -159,7 +162,6 @@ CATEGORY_CONFIG: dict[str, dict] = {
     },
 }
 
-# Slug aliases so short URLs still work
 _SLUG_ALIASES: dict[str, str] = {
     "camera":      "camera-phones",
     "battery":     "battery-life",
@@ -170,11 +172,8 @@ _SLUG_ALIASES: dict[str, str] = {
 }
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
 @router.get("")
 async def list_categories():
-    """All available category slugs, titles, and descriptions. Cached 1 hour."""
     async def _fetch():
         return {
             "categories": [
@@ -189,9 +188,8 @@ async def list_categories():
 @router.get("/{category_slug}")
 async def get_category(
     category_slug: str,
-    limit:         int = Query(10, ge=5, le=20),
+    limit: int = Query(10, ge=5, le=20),
 ):
-    """Ranked phone list for a given category. Cached 1 hour."""
     resolved = _SLUG_ALIASES.get(category_slug, category_slug)
     cfg = CATEGORY_CONFIG.get(resolved)
     if not cfg:
