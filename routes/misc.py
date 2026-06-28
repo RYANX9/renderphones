@@ -8,8 +8,7 @@ from fastapi import APIRouter
 from fastapi.responses import Response, JSONResponse
 
 from cache import cached
-from config import get_settings
-settings = get_settings()  
+from config import settings
 from database import get_pool
 
 logger = logging.getLogger(__name__)
@@ -17,16 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["system"])
 
 
-# ── Slug helper ───────────────────────────────────────────────────────────────
-
 def _slugify(text: str) -> str:
-    """
-    Matches the frontend's phoneSlug() / brandSlug() in lib/config.ts exactly:
-    NFD-decompose → strip combining marks → lowercase → collapse non-alphanumeric to '-'
-    → strip leading/trailing hyphens.
-    The original fapi.py used .replace(' ', '-') only, producing mismatches for
-    any model name containing punctuation (e.g. "Galaxy S25+ (5G)").
-    """
     text = unicodedata.normalize("NFD", text)
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
     text = text.lower()
@@ -34,30 +24,27 @@ def _slugify(text: str) -> str:
     return text.strip("-")
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
 @router.get("/filters/stats")
 async def get_filter_stats():
-    """Aggregate stats used to populate filter panel ranges. Cached 1 hour."""
     async def _fetch():
         async with get_pool().acquire() as conn:
             stats = await conn.fetchrow(
                 """
                 SELECT
-                    COUNT(*)                    AS total,
-                    COUNT(DISTINCT brand)        AS total_brands,
-                    MIN(price_usd)               AS min_price,
-                    MAX(price_usd)               AS max_price,
-                    MIN(battery_capacity)        AS min_battery,
-                    MAX(battery_capacity)        AS max_battery,
-                    MIN(screen_size)             AS min_screen,
-                    MAX(screen_size)             AS max_screen,
-                    MIN(weight_g)                AS min_weight,
-                    MAX(weight_g)                AS max_weight,
-                    MIN(fast_charging_w)         AS min_charging,
-                    MAX(fast_charging_w)         AS max_charging,
-                    MIN(release_year)            AS min_year,
-                    MAX(release_year)            AS max_year
+                    COUNT(*)               AS total,
+                    COUNT(DISTINCT brand)  AS total_brands,
+                    MIN(price_usd)         AS min_price,
+                    MAX(price_usd)         AS max_price,
+                    MIN(battery_capacity)  AS min_battery,
+                    MAX(battery_capacity)  AS max_battery,
+                    MIN(screen_size)       AS min_screen,
+                    MAX(screen_size)       AS max_screen,
+                    MIN(weight_g)          AS min_weight,
+                    MAX(weight_g)          AS max_weight,
+                    MIN(fast_charging_w)   AS min_charging,
+                    MAX(fast_charging_w)   AS max_charging,
+                    MIN(release_year)      AS min_year,
+                    MAX(release_year)      AS max_year
                 FROM phones
                 WHERE price_usd > 0
                 """
@@ -89,14 +76,14 @@ async def get_filter_stats():
             )
 
         return {
-            "total_phones":  stats["total"],
-            "total_brands":  stats["total_brands"],
-            "price_range":    {"min": float(stats["min_price"]    or 0),    "max": float(stats["max_price"]    or 5000)},
-            "battery_range":  {"min": int(stats["min_battery"]    or 1000),  "max": int(stats["max_battery"]    or 10000)},
-            "screen_range":   {"min": float(stats["min_screen"]   or 4.0),   "max": float(stats["max_screen"]   or 7.5)},
-            "weight_range":   {"min": int(stats["min_weight"]     or 100),   "max": int(stats["max_weight"]     or 300)},
-            "charging_range": {"min": int(stats["min_charging"]   or 5),     "max": int(stats["max_charging"]   or 240)},
-            "year_range":     {"min": int(stats["min_year"]       or 2018),  "max": int(stats["max_year"]       or 2026)},
+            "total_phones":   stats["total"],
+            "total_brands":   stats["total_brands"],
+            "price_range":    {"min": float(stats["min_price"]   or 0),    "max": float(stats["max_price"]   or 5000)},
+            "battery_range":  {"min": int(stats["min_battery"]   or 1000),  "max": int(stats["max_battery"]   or 10000)},
+            "screen_range":   {"min": float(stats["min_screen"]  or 4.0),   "max": float(stats["max_screen"]  or 7.5)},
+            "weight_range":   {"min": int(stats["min_weight"]    or 100),   "max": int(stats["max_weight"]    or 300)},
+            "charging_range": {"min": int(stats["min_charging"]  or 5),     "max": int(stats["max_charging"]  or 240)},
+            "year_range":     {"min": int(stats["min_year"]      or 2018),  "max": int(stats["max_year"]      or 2026)},
             "brands":         [{"brand": r["brand"], "count": r["count"]} for r in brands],
             "ram_options":    [r["ram"] for r in rams if r["ram"]],
             "release_years":  [r["release_year"] for r in years],
@@ -107,12 +94,6 @@ async def get_filter_stats():
 
 @router.get("/sitemap.xml", response_class=Response)
 async def generate_sitemap():
-    """
-    XML sitemap for all phone pages.
-    Uses the same slug algorithm as the frontend (slugify) — not a simple
-    space→hyphen replacement — so sitemap URLs match actual routes.
-    Cached 24 hours.
-    """
     async def _fetch():
         async with get_pool().acquire() as conn:
             rows = await conn.fetch("SELECT brand, model_name FROM phones")
@@ -120,7 +101,6 @@ async def generate_sitemap():
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
-            # Homepage
             '<url><loc>https://mobylite.vercel.app/</loc><priority>1.0</priority></url>',
             '<url><loc>https://mobylite.vercel.app/compare</loc><priority>0.7</priority></url>',
             '<url><loc>https://mobylite.vercel.app/pick</loc><priority>0.7</priority></url>',
@@ -130,14 +110,12 @@ async def generate_sitemap():
         for r in rows:
             brand_s = _slugify(r["brand"])
             model_s = _slugify(r["model_name"])
-            # Brand page — deduplicate
             if brand_s not in seen_brands:
                 seen_brands.add(brand_s)
                 lines.append(
                     f'<url><loc>https://mobylite.vercel.app/brand/{brand_s}</loc>'
                     f'<priority>0.6</priority></url>'
                 )
-            # Phone detail page
             lines.append(
                 f'<url><loc>https://mobylite.vercel.app/brand/{brand_s}/{model_s}</loc>'
                 f'<priority>0.8</priority></url>'
@@ -152,10 +130,6 @@ async def generate_sitemap():
 
 @router.post("/history/views")
 async def record_view(data: dict):
-    """
-    Records a phone view for future analytics / trending data.
-    Currently logs to server stdout; wire to DB when the schema is ready.
-    """
     phone_id = data.get("phone_id")
     if phone_id:
         logger.info("view phone_id=%s", phone_id)
@@ -164,7 +138,6 @@ async def record_view(data: dict):
 
 @router.get("/health")
 async def health():
-    """Liveness + DB connectivity check."""
     try:
         async with get_pool().acquire() as conn:
             await conn.fetchval("SELECT 1")
