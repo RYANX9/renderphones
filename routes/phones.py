@@ -6,8 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from cache import cached
-from config import get_settings
-settings = get_settings()  
+from config import settings
 from database import (
     get_pool, row_to_dict, rows_to_list,
     PHONE_LIST_SELECT, RELEASE_TS_EXPR,
@@ -20,8 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/phones", tags=["phones"])
 
 
-# ── static routes ─────────────────────────────────────────────────────────────
-# Must all be declared BEFORE /{phone_id} or FastAPI will treat them as IDs.
+# ── static routes — must come before /{phone_id} ─────────────────────────────
 
 @router.get("/search")
 async def search_phones(
@@ -43,7 +41,6 @@ async def search_phones(
     page:               int             = Query(1,  ge=1),
     page_size:          int             = Query(24, ge=1, le=100),
 ):
-    """Full-text + filter search. Never cached — always fresh."""
     where, params = build_search_where(
         q=q,
         brand=brand,
@@ -83,11 +80,6 @@ async def search_phones(
 
 @router.get("/trending")
 async def get_trending(limit: int = Query(10, ge=1, le=20)):
-    """
-    Most-recent phones ranked by AnTuTu.
-    Note: This is recency + performance, not view data.
-    Cached 15 minutes.
-    """
     async def _fetch():
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(
@@ -108,7 +100,6 @@ async def get_trending(limit: int = Query(10, ge=1, le=20)):
 
 @router.get("/latest")
 async def get_latest(limit: int = Query(20, ge=1, le=50)):
-    """Most recent releases. Cached 1 hour."""
     async def _fetch():
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(
@@ -128,10 +119,9 @@ async def get_latest(limit: int = Query(20, ge=1, le=50)):
 
 @router.get("/compare")
 async def compare_phones(
-    ids:   Optional[str] = Query(None, description="Comma-separated phone IDs, 2–4"),
-    slugs: Optional[str] = Query(None, description="Comma-separated phone slugs"),
+    ids:   Optional[str] = Query(None),
+    slugs: Optional[str] = Query(None),
 ):
-    """Return 2–4 phones in the requested order. Never cached."""
     if not ids and not slugs:
         raise HTTPException(status_code=400, detail="Provide ids or slugs.")
 
@@ -144,7 +134,7 @@ async def compare_phones(
                 "SELECT * FROM phones WHERE slug = ANY($1::text[])",
                 slug_list,
             )
-        key_field = "slug"
+        key_field  = "slug"
         order_keys: list = slug_list
     else:
         try:
@@ -160,7 +150,7 @@ async def compare_phones(
                 "SELECT * FROM phones WHERE id = ANY($1::int[])",
                 id_list,
             )
-        key_field = "id"
+        key_field  = "id"
         order_keys = id_list
 
     phones = []
@@ -178,13 +168,9 @@ async def compare_phones(
 async def recommend(
     min_price:  Optional[float] = Query(None),
     max_price:  Optional[float] = Query(None),
-    priorities: str             = Query(..., description=(
-        "Comma-separated: camera, battery, performance, compact, "
-        "lightweight, display, fast_charging, value"
-    )),
-    limit: int = Query(5, ge=3, le=10),
+    priorities: str             = Query(...),
+    limit:      int             = Query(5, ge=3, le=10),
 ):
-    """Priority-weighted recommendation. Never cached."""
     priority_list = [p.strip().lower() for p in priorities.split(",") if p.strip()]
     if not priority_list:
         raise HTTPException(status_code=400, detail="At least one priority required.")
@@ -224,13 +210,13 @@ async def recommend(
             return 0.0
         return max(0.0, min(1.0, ((val or 0) - lo) / (hi - lo)))
 
-    cam_max    = _max("main_camera_mp")
-    bat_max    = _max("battery_capacity")
-    ant_max    = _max("antutu_score")
-    chg_max    = _max("fast_charging_w")
-    scr_max    = _max("screen_size")
-    scr_min    = min((p["screen_size"] or 100) for p in phones) or 1.0
-    wgt_max    = _max("weight_g")
+    cam_max = _max("main_camera_mp")
+    bat_max = _max("battery_capacity")
+    ant_max = _max("antutu_score")
+    chg_max = _max("fast_charging_w")
+    scr_max = _max("screen_size")
+    scr_min = min((p["screen_size"] or 100) for p in phones) or 1.0
+    wgt_max = _max("weight_g")
 
     def _score(p: dict) -> float:
         s = 0.0
@@ -259,14 +245,10 @@ async def recommend(
     return {"phones": phones[:limit], "priorities": priority_list}
 
 
-# ── parameterized routes ───────────────────────────────────────────────────────
+# ── parameterized routes ──────────────────────────────────────────────────────
 
 @router.get("/{phone_id}")
 async def get_phone(phone_id: int):
-    """
-    Full phone detail with value_score computed against price peers.
-    Cached 24 hours.
-    """
     async def _fetch():
         async with get_pool().acquire() as conn:
             row = await conn.fetchrow(
@@ -290,7 +272,7 @@ async def get_phone(phone_id: int):
                     FROM   phones
                     WHERE  price_usd BETWEEN $1 AND $2
                       AND  id != $3
-                    ORDER  BY id          -- deterministic subset every request
+                    ORDER  BY id
                     LIMIT  50
                     """,
                     lo, hi, phone_id,
@@ -310,7 +292,6 @@ async def get_phone(phone_id: int):
 
 @router.get("/{phone_id}/similar")
 async def get_similar(phone_id: int, limit: int = Query(12, ge=1, le=24)):
-    """Similar phones by price + screen range + spec similarity. Cached 1 hour."""
     async def _fetch():
         async with get_pool().acquire() as conn:
             base = await conn.fetchrow(
@@ -346,12 +327,10 @@ async def get_similar(phone_id: int, limit: int = Query(12, ge=1, le=24)):
                 idx += 2
 
             where = " AND ".join(conditions)
-
-            # Append scoring params AFTER WHERE params so indices stay clean
             params += [brand, antutu_score or 0.0, battery_capacity or 0.0]
-            brand_i  = idx
-            ant_i    = idx + 1
-            bat_i    = idx + 2
+            brand_i = idx
+            ant_i   = idx + 1
+            bat_i   = idx + 2
 
             rows = await conn.fetch(
                 f"""
@@ -361,9 +340,11 @@ async def get_similar(phone_id: int, limit: int = Query(12, ge=1, le=24)):
                     p.main_camera_mp, p.battery_capacity, p.screen_size,
                     p.weight_g, p.chipset, p.ram_options, p.storage_options,
                     p.fast_charging_w, p.antutu_score,
-                    {RELEASE_TS_EXPR.replace('release_year', 'p.release_year')
-                                    .replace('release_month', 'p.release_month')
-                                    .replace('release_day',   'p.release_day')} AS release_ts
+                    EXTRACT(EPOCH FROM MAKE_DATE(
+                        COALESCE(p.release_year, 1970),
+                        COALESCE(p.release_month, 1),
+                        COALESCE(p.release_day, 1)
+                    ))::bigint AS release_ts
                 FROM phones p
                 WHERE {where}
                 ORDER BY (
@@ -397,7 +378,6 @@ async def get_similar(phone_id: int, limit: int = Query(12, ge=1, le=24)):
 
 @router.get("/{phone_id}/stats")
 async def get_stats(_phone_id: int):
-    """Placeholder for future review/rating system."""
     return {
         "success": True,
         "stats": {
@@ -413,5 +393,4 @@ async def get_stats(_phone_id: int):
 
 @router.get("/{phone_id}/also-compared")
 async def also_compared(_phone_id: int):
-    """Placeholder for collaborative-filtering feature."""
     return {"phones": []}
