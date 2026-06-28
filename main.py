@@ -57,12 +57,22 @@ app.add_middleware(
 )
 
 
+# CORSMiddleware does not reliably inject headers on responses produced by
+# exception handlers because the handler short-circuits the ASGI middleware
+# chain before CORS processing can run.  We set the headers explicitly here,
+# exactly as the original fapi.py did, so the browser never sees a
+# CORS-blocked error response regardless of what went wrong server-side.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
         content={"detail": str(exc)},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        },
     )
 
 
