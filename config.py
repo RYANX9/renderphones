@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     rate_limit_requests: int = 120
     rate_limit_window: int = 60
 
-    cors_origins: str = "https://mobylite.vercel.app"
+    # "*" matches the original fapi.py behaviour (allow_origins=["*"]).
+    # Set CORS_ORIGINS in the environment to restrict to specific origins
+    # once you are ready to tighten this up (e.g. "https://mobylite.vercel.app").
+    cors_origins: str = "*"
 
     debug: bool = False
     app_version: str = "2.0.0"
@@ -40,5 +43,4 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# Module-level singleton — routes import this directly: `from config import settings`
 settings = get_settings()
