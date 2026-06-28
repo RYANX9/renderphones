@@ -3,21 +3,21 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from config import get_settings
 from database import create_pool, close_pool
 from middleware import RequestContextMiddleware, RateLimitMiddleware
-from routes.phones import router as phones_router
 from routes.brands import router as brands_router
 from routes.categories import router as categories_router
+from routes.phones import router as phones_router
 from routes.misc import router as misc_router
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -32,44 +32,41 @@ async def lifespan(app: FastAPI):
         max_size=settings.db_pool_max,
         command_timeout=settings.db_command_timeout,
     )
-    logger.info("Mobylite API v%s ready", settings.app_version)
     yield
     await close_pool()
-    logger.info("Shutdown complete")
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(
-        title="Mobylite API",
-        version=settings.app_version,
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
-        lifespan=lifespan,
+app = FastAPI(
+    title="Mobylite API",
+    version=settings.app_version,
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(RequestContextMiddleware)
+app.add_middleware(
+    RateLimitMiddleware,
+    requests=settings.rate_limit_requests,
+    window=settings.rate_limit_window,
+)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-    )
 
-    app.add_middleware(RequestContextMiddleware)
-
-    app.add_middleware(
-        RateLimitMiddleware,
-        requests=settings.rate_limit_requests,
-        window=settings.rate_limit_window,
-    )
-
-    app.include_router(phones_router)
-    app.include_router(brands_router)
-    app.include_router(categories_router)
-    app.include_router(misc_router)
-
-    return app
-
-
-app = create_app()
+app.include_router(phones_router)
+app.include_router(brands_router)
+app.include_router(categories_router)
+app.include_router(misc_router)
