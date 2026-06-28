@@ -4,28 +4,46 @@ import re
 
 _FLAGSHIP = re.compile(
     r"""
-    snapdragon\s+8\s+elite              |
-    snapdragon\s+8s\s+elite             |
-    snapdragon\s+8\s+gen\s*[1-9]        |
-    snapdragon\s+8s\s+gen\s*[1-9]       |
-    dimensity\s+9[0-9]{3}               |
-    exynos\s+2[0-9]{3}                  |
-    apple\s+a1[4-9](?:\s+(?:bionic|pro))?   |
-    apple\s+a[2-9][0-9](?:\s+(?:bionic|pro))?   |
-    tensor\s+g[3-9]                     |
-    kirin\s+9[0-9]{3}
+    # Snapdragon 8 / 8+ / 8s — Elite or Gen N
+    snapdragon \s+ 8 [+s]? \s* (?: elite | gen \s* \d+ )
+    # Qualcomm model numbers: SM8150 (SD855) → SM8750 (SD8 Elite)
+    | \b sm8[1-9]\d{2} \b
+    # MediaTek Dimensity 9xxx
+    | dimensity \s+ 9\d{3}
+    # MediaTek Dimensity 9xxx model numbers (MT6989=9300, MT6991=9400)
+    | \b mt699\d \b
+    # Samsung Exynos 2xxx
+    | exynos \s+ 2\d{3}
+    # Apple A14 and above (bionic / pro / max suffix optional)
+    | apple \s+ a (?: 1[4-9] | [2-9]\d ) (?: \s+ (?: bionic | pro | max ) )?
+    # Google Tensor G3+
+    | tensor \s+ g [3-9]
+    # Huawei / HiSilicon Kirin 9xxx
+    | kirin \s+ 9\d{3}
     """,
     re.VERBOSE | re.IGNORECASE,
 )
 
 _MID = re.compile(
     r"""
-    snapdragon\s+7                  |
-    snapdragon\s+6                  |
-    dimensity\s+[78][0-9]{2,3}      |
-    exynos\s+1[0-9]{3}              |
-    kirin\s+8[0-9]{2}               |
-    tensor\s+g[12]
+    # Snapdragon 7 / 7+ / 7s Gen N (requires "Gen" — excludes 730, 720, etc.)
+    snapdragon \s+ 7 [+s]? \s* gen
+    # Snapdragon 6 Gen N only (excludes 695, 690, 680 — those are entry)
+    | snapdragon \s+ 6 \s+ gen
+    # Qualcomm SM7xxx model numbers
+    | \b sm7[1-6]\d{2} \b
+    # MediaTek Dimensity 7xxx / 8xxx
+    | dimensity \s+ [78]\d{2,3}
+    # MediaTek 7/8xx model numbers (MT67xx, MT68xx)
+    | \b mt6[78]\d{2} \b
+    # Samsung Exynos 1xxx
+    | exynos \s+ 1\d{3}
+    # Huawei Kirin 8xx
+    | kirin \s+ 8\d{2}
+    # Google Tensor G1 / G2
+    | tensor \s+ g [12]
+    # Apple A10–A13
+    | apple \s+ a1[0-3] (?: \s+ (?: bionic | pro ) )?
     """,
     re.VERBOSE | re.IGNORECASE,
 )
