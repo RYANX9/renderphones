@@ -6,39 +6,69 @@ from fastapi import APIRouter, HTTPException, Query
 
 from cache import cached
 from config import settings
-from database import get_pool, row_to_dict, rows_to_list, PHONE_LIST_SELECT
+from database import get_pool, row_to_dict, rows_to_list
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 
+# p.* plus release_ts (as in PHONE_LIST_SELECT) plus the smart-score fields
+# worth surfacing on category listings. Aliased for the phones/phone_smart_scores join.
+_CATEGORY_COLS = """
+    p.*,
+    EXTRACT(EPOCH FROM MAKE_DATE(
+        COALESCE(p.release_year, 1970),
+        COALESCE(p.release_month, 1),
+        COALESCE(p.release_day, 1)
+    ))::bigint AS release_ts,
+    s.tier AS smart_tier,
+    s.overall_score AS smart_overall_score
+"""
 
-def _category_sql(score_expr: str, where_clause: str) -> str:
+
+def _category_sql(smart_expr: str, legacy_score_expr: str, where_clause: str) -> str:
     """
-    Builds a CTE template string with two deferred placeholders:
-      {cols}  — filled with PHONE_LIST_SELECT at request time
-      {limit} — filled with the limit param at request time
+    Builds a CTE with two deferred placeholders filled at request time:
+      {cols}  — _CATEGORY_COLS
+      {limit} — the requested result count
 
-    score_expr and where_clause are baked in at definition time (f-string).
-    {{cols}} and {{limit}} survive as literal {cols}/{limit} for .format().
+    Ranking logic:
+      1. candidates: every matching phone, with both the smart sub-score
+         (already 0-10) and the legacy raw formula score computed.
+      2. normalized: the legacy raw score is normalized to 0-10 across the
+         WHOLE candidate pool (not just the top N) so it lands on the same
+         scale as the smart sub-score before either is used to rank anyone.
+      3. blended_score = smart sub-score when the phone has been scored,
+         otherwise the normalized legacy score. Top N picked on this.
+      4. category_score: final 0-10 re-normalization within the top N, so
+         the #1 phone is always exactly 10.0 — same contract as before.
     """
     return f"""
-        WITH base AS (
+        WITH candidates AS (
             SELECT {{cols}},
-                   ({score_expr}) AS raw_score
-            FROM   phones
+                   ({smart_expr})        AS smart_metric,
+                   ({legacy_score_expr}) AS legacy_raw_score
+            FROM   phones p
+            LEFT JOIN phone_smart_scores s ON s.phone_id = p.id
             WHERE  {where_clause}
         ),
+        normalized AS (
+            SELECT *,
+                   COALESCE(
+                       smart_metric,
+                       10.0 * legacy_raw_score / NULLIF(MAX(legacy_raw_score) OVER (), 0)
+                   ) AS blended_score
+            FROM   candidates
+        ),
         top_n AS (
-            SELECT *
-            FROM   base
-            ORDER  BY raw_score DESC
+            SELECT * FROM normalized
+            ORDER  BY blended_score DESC NULLS LAST
             LIMIT  {{limit}}
         )
         SELECT *,
-               10.0 * raw_score / NULLIF(MAX(raw_score) OVER (), 0) AS category_score
+               10.0 * blended_score / NULLIF(MAX(blended_score) OVER (), 0) AS category_score
         FROM   top_n
-        ORDER  BY raw_score DESC
+        ORDER  BY blended_score DESC NULLS LAST
     """
 
 
@@ -46,117 +76,147 @@ CATEGORY_CONFIG: dict[str, dict] = {
     "camera-phones": {
         "title": "Best Camera Phones",
         "description": (
-            "Multi-factor ranking: main sensor resolution (40%), "
-            "AI chip performance (40%), and fast charging (20%)."
+            "Ranked by our smart camera score where available (sensor quality, "
+            "OIS, versatility, real-world imaging), falling back to a spec "
+            "composite of resolution, chip performance, and charging speed "
+            "for unscored phones."
         ),
         "sql": _category_sql(
-            score_expr="""
-                COALESCE(main_camera_mp, 0)::float * 0.40
-                + COALESCE(antutu_score, 0)::float / 200000.0 * 2.0
-                + COALESCE(fast_charging_w, 0)::float * 0.05
+            smart_expr="s.camera_score",
+            legacy_score_expr="""
+                COALESCE(p.main_camera_mp, 0)::float * 0.40
+                + COALESCE(p.antutu_score, 0)::float / 200000.0 * 2.0
+                + COALESCE(p.fast_charging_w, 0)::float * 0.05
             """,
             where_clause=(
-                "main_camera_mp IS NOT NULL "
-                "AND screen_size >= 5.5 "
-                "AND release_year >= 2023"
+                "p.main_camera_mp IS NOT NULL "
+                "AND p.screen_size >= 5.5 "
+                "AND p.release_year >= 2023"
             ),
         ),
     },
     "battery-life": {
         "title": "Best Battery Life",
-        "description": "Ranked by raw battery capacity. 5000 mAh+ on efficient modern chips dominate.",
+        "description": (
+            "Ranked by our smart battery score where available (capacity, "
+            "efficiency, real endurance), falling back to raw battery "
+            "capacity for unscored phones."
+        ),
         "sql": _category_sql(
-            score_expr="COALESCE(battery_capacity, 0)::float",
+            smart_expr="s.battery_score",
+            legacy_score_expr="COALESCE(p.battery_capacity, 0)::float",
             where_clause=(
-                "battery_capacity IS NOT NULL "
-                "AND screen_size >= 5.5 "
-                "AND release_year >= 2023"
+                "p.battery_capacity IS NOT NULL "
+                "AND p.screen_size >= 5.5 "
+                "AND p.release_year >= 2023"
             ),
         ),
     },
     "gaming-phones": {
         "title": "Best Gaming Phones",
         "description": (
-            "Top AnTuTu benchmark scores from 2024 and newer. "
-            "Snapdragon 8 Elite and Dimensity 9400+ class chips only."
+            "Ranked by our smart performance score where available, falling "
+            "back to raw AnTuTu benchmark for unscored phones. 2024+ releases only."
         ),
         "sql": _category_sql(
-            score_expr="COALESCE(antutu_score, 0)::float",
+            smart_expr="s.performance_score",
+            legacy_score_expr="COALESCE(p.antutu_score, 0)::float",
             where_clause=(
-                "antutu_score IS NOT NULL "
-                "AND screen_size >= 5.5 "
-                "AND release_year >= 2024"
+                "p.antutu_score IS NOT NULL "
+                "AND p.screen_size >= 5.5 "
+                "AND p.release_year >= 2024"
             ),
         ),
     },
     "under-300": {
         "title": "Best Phones Under $300",
-        "description": "Maximum specs per dollar under $300. Composite of battery, camera, and performance.",
+        "description": (
+            "Ranked by our smart value score where available, falling back "
+            "to a specs-per-dollar composite for unscored phones."
+        ),
         "sql": _category_sql(
-            score_expr="""
-                COALESCE(battery_capacity, 0)::float / 500.0
-                + COALESCE(main_camera_mp, 0)::float / 10.0
-                + COALESCE(antutu_score, 0)::float / 100000.0
+            smart_expr="s.value_score",
+            legacy_score_expr="""
+                COALESCE(p.battery_capacity, 0)::float / 500.0
+                + COALESCE(p.main_camera_mp, 0)::float / 10.0
+                + COALESCE(p.antutu_score, 0)::float / 100000.0
             """,
             where_clause=(
-                "price_usd <= 300 "
-                "AND price_usd > 0 "
-                "AND screen_size >= 5.5 "
-                "AND release_year >= 2022"
+                "p.price_usd <= 300 "
+                "AND p.price_usd > 0 "
+                "AND p.screen_size >= 5.5 "
+                "AND p.release_year >= 2022"
             ),
         ),
     },
     "under-500": {
         "title": "Best Phones Under $500",
-        "description": "The mid-range sweet spot. Near-flagship specs at half the price.",
+        "description": (
+            "Ranked by our smart value score where available, falling back "
+            "to a specs-per-dollar composite for unscored phones."
+        ),
         "sql": _category_sql(
-            score_expr="""
-                COALESCE(battery_capacity, 0)::float / 500.0
-                + COALESCE(main_camera_mp, 0)::float / 10.0
-                + COALESCE(antutu_score, 0)::float / 100000.0
+            smart_expr="s.value_score",
+            legacy_score_expr="""
+                COALESCE(p.battery_capacity, 0)::float / 500.0
+                + COALESCE(p.main_camera_mp, 0)::float / 10.0
+                + COALESCE(p.antutu_score, 0)::float / 100000.0
             """,
             where_clause=(
-                "price_usd <= 500 "
-                "AND price_usd > 0 "
-                "AND screen_size >= 5.5 "
-                "AND release_year >= 2022"
+                "p.price_usd <= 500 "
+                "AND p.price_usd > 0 "
+                "AND p.screen_size >= 5.5 "
+                "AND p.release_year >= 2022"
             ),
         ),
     },
     "lightweight": {
         "title": "Lightest Smartphones",
-        "description": "Modern smartphones (5.5\"+ screen) between 100 g–185 g. Feature phones excluded.",
+        "description": (
+            "Modern smartphones (5.5\"+ screen) between 100g-185g. Purely a "
+            "physical measurement — smart score does not apply here."
+        ),
         "sql": _category_sql(
-            score_expr="(200.0 - COALESCE(weight_g, 200))::float",
+            smart_expr="NULL::numeric",
+            legacy_score_expr="(200.0 - COALESCE(p.weight_g, 200))::float",
             where_clause=(
-                "weight_g IS NOT NULL "
-                "AND weight_g BETWEEN 100 AND 185 "
-                "AND screen_size >= 5.5 "
-                "AND release_year >= 2023"
+                "p.weight_g IS NOT NULL "
+                "AND p.weight_g BETWEEN 100 AND 185 "
+                "AND p.screen_size >= 5.5 "
+                "AND p.release_year >= 2023"
             ),
         ),
     },
     "compact-phones": {
         "title": "Best Compact Phones",
-        "description": "Smartphones with screens between 5.0\"–6.3\". Ranked by AnTuTu performance.",
+        "description": (
+            "Screens between 5.0\"-6.3\". Ranked by our smart performance "
+            "score where available within the compact segment, falling back "
+            "to raw AnTuTu."
+        ),
         "sql": _category_sql(
-            score_expr="COALESCE(antutu_score, 0)::float",
+            smart_expr="s.performance_score",
+            legacy_score_expr="COALESCE(p.antutu_score, 0)::float",
             where_clause=(
-                "screen_size <= 6.3 "
-                "AND screen_size >= 5.0 "
-                "AND release_year >= 2023"
+                "p.screen_size <= 6.3 "
+                "AND p.screen_size >= 5.0 "
+                "AND p.release_year >= 2023"
             ),
         ),
     },
     "fast-charging": {
         "title": "Fastest Charging Phones",
-        "description": "Ranked by maximum wired charging wattage. 30 W minimum. 90 W+ is the 2026 premium benchmark.",
+        "description": (
+            "Ranked by maximum wired charging wattage. 30W minimum. Purely a "
+            "physical measurement — smart score does not apply here."
+        ),
         "sql": _category_sql(
-            score_expr="COALESCE(fast_charging_w, 0)::float",
+            smart_expr="NULL::numeric",
+            legacy_score_expr="COALESCE(p.fast_charging_w, 0)::float",
             where_clause=(
-                "fast_charging_w >= 30 "
-                "AND screen_size >= 5.5 "
-                "AND release_year >= 2023"
+                "p.fast_charging_w >= 30 "
+                "AND p.screen_size >= 5.5 "
+                "AND p.release_year >= 2023"
             ),
         ),
     },
@@ -196,14 +256,17 @@ async def get_category(
         raise HTTPException(status_code=404, detail=f"Category '{category_slug}' not found.")
 
     async def _fetch():
-        sql = cfg["sql"].format(cols=PHONE_LIST_SELECT, limit=limit)
+        sql = cfg["sql"].format(cols=_CATEGORY_COLS, limit=limit)
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(sql)
 
         phones = []
         for r in rows:
             d = row_to_dict(r)
-            d.pop("raw_score", None)
+            # internal ranking scaffolding — not part of the public contract
+            d.pop("smart_metric", None)
+            d.pop("legacy_raw_score", None)
+            d.pop("blended_score", None)
             raw_cs = d.pop("category_score", 0) or 0
             d["category_score"] = round(float(raw_cs), 2)
             phones.append(d)
