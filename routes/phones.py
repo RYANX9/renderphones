@@ -12,7 +12,8 @@ from database import (
     PHONE_LIST_SELECT, RELEASE_TS_EXPR,
 )
 from utils.query import build_search_where, resolve_sort, parse_json_safe
-from utils.scoring import chipset_tier, compute_value_score
+from utils.scoring import chipset_tier, compute_value_score, fetch_smart_score
+from utils.pricing import fetch_latest_price, fetch_price_history
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,17 @@ async def get_phone(phone_id: int):
             phone = row_to_dict(row)
             phone["full_specifications"] = parse_json_safe(phone.get("full_specifications"))
 
+            # current price always reflects the latest tracked price point,
+            # falling back to the static phones.price_usd if it's never been tracked
+            latest_price = await fetch_latest_price(conn, phone_id)
+            if latest_price:
+                phone["price_usd"] = float(latest_price["price_usd"])
+                phone["price_updated_at"] = latest_price["snapshot_date"]
+                phone["price_scope"] = latest_price["scope"]
+            else:
+                phone["price_updated_at"] = None
+                phone["price_scope"] = None
+
             if phone.get("price_usd"):
                 lo = phone["price_usd"] * 0.70
                 hi = phone["price_usd"] * 1.30
@@ -282,6 +294,7 @@ async def get_phone(phone_id: int):
                 phone["value_score"] = None
 
             phone["chipset_tier"] = chipset_tier(phone.get("chipset"))
+            phone["smart_score"] = await fetch_smart_score(conn, phone_id)
             return phone
 
     result = await cached(f"phone:{phone_id}", settings.cache_ttl_phone_detail, _fetch)
@@ -374,6 +387,45 @@ async def get_similar(phone_id: int, limit: int = Query(12, ge=1, le=24)):
     if result is None:
         raise HTTPException(status_code=404, detail="Phone not found.")
     return result
+
+
+@router.get("/{phone_id}/score")
+async def get_score(phone_id: int):
+    async def _fetch():
+        async with get_pool().acquire() as conn:
+            exists = await conn.fetchval("SELECT 1 FROM phones WHERE id = $1", phone_id)
+            if not exists:
+                return None
+            score = await fetch_smart_score(conn, phone_id)
+        return {"phone_id": phone_id, "smart_score": score}
+
+    result = await cached(f"score:{phone_id}", settings.cache_ttl_stable, _fetch)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Phone not found.")
+    return result
+
+
+@router.get("/{phone_id}/price")
+async def get_price(
+    phone_id: int,
+    scope: Optional[str] = Query(None, description="Filter history by scope, e.g. 'local'"),
+    limit: int = Query(365, ge=1, le=2000),
+):
+    async with get_pool().acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM phones WHERE id = $1", phone_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Phone not found.")
+
+        history = await fetch_price_history(conn, phone_id, scope=scope, limit=limit)
+
+    current_price_usd = float(history[0]["price_usd"]) if history else None
+
+    return {
+        "phone_id": phone_id,
+        "current_price_usd": current_price_usd,
+        "count": len(history),
+        "history": history,
+    }
 
 
 @router.get("/{phone_id}/stats")
