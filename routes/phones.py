@@ -29,16 +29,14 @@ _SMART_KEYS = (
     "smart_reasoning", "smart_model_version", "smart_scored_at", "smart_tier",
 )
 
+# Peer-group size used to normalise the value_score fallback for a single
+# phone lookup (get_phone). Must be called AFTER attach_computed_fields —
+# that function reads smart_value_score off the same dict to compute
+# value_score, and _pop_smart_score removes it.
+_VALUE_PEER_LIMIT = 40
+
 
 def _pop_smart_score(d: dict) -> Optional[dict]:
-    """Pulls the smart_* columns (from the phone_smart_scores join) off a
-    row dict and returns them as a nested SmartScore-shaped dict, or None
-    if the phone has never been scored. Mutates `d` in place.
-
-    Must be called AFTER attach_computed_fields — that function reads
-    smart_value_score off the same dict to compute value_score, and this
-    function removes it.
-    """
     has_score = d.get("smart_overall_score") is not None
     out = None
     if has_score:
@@ -69,20 +67,12 @@ def _resolve_sort(sort_by: str, sort_order: str) -> tuple[str, str]:
 
 
 def _round_money(v) -> Optional[float]:
-    """Every price column comes out of Postgres as a numeric with float-noise
-    tails (1055.26729, 1489.8059999999998). Round once, at the API boundary,
-    to 2dp everywhere a price leaves this service."""
     if v is None:
         return None
     return round(float(v), 2)
 
 
 async def _latest_price(conn, phone_id: int) -> Optional[dict]:
-    """price_points is the source of truth for current pricing —
-    phones.price_usd is a denormalised snapshot that can lag behind it.
-    'global' scope is the canonical price; only fall back to 'local' rows
-    if the phone has never had a global snapshot at all. Within whichever
-    scope wins, pick the most recent snapshot_date."""
     row = await conn.fetchrow(
         """
         SELECT price_usd, price_original, scope, snapshot_date
@@ -102,9 +92,8 @@ async def _latest_price(conn, phone_id: int) -> Optional[dict]:
 
 
 def _apply_latest_price(target: dict, price: Optional[dict]) -> None:
-    """Overlays a price_points row onto a phone dict, but only when that
-    row actually carries a price. A row with a NULL price_usd (phone
-    currently untracked/out of stock) must not clobber the denormalised
+    """A price_points row with a NULL price_usd (phone currently
+    untracked / out of stock) must not clobber the denormalised
     phones.price_usd fallback."""
     if price is None or price.get("price_usd") is None:
         return
@@ -112,6 +101,32 @@ def _apply_latest_price(target: dict, price: Optional[dict]) -> None:
     target["price_original"] = price.get("price_original")
     target["price_updated_at"] = str(price["snapshot_date"])
     target["price_scope"] = price["scope"]
+
+
+async def _fetch_value_peers(conn, phone: dict) -> list[dict]:
+    """Real comparison set for the value_score fallback on a single-phone
+    lookup — same price-band-plus-brand logic as /similar, so the number
+    shown on the detail page is computed the same way as on list pages
+    instead of degenerating to a peer group of one."""
+    price = phone.get("price_usd")
+    lo = price * 0.65 if price else None
+    hi = price * 1.45 if price else None
+
+    rows = await conn.fetch(
+        f"""
+        SELECT {PHONE_SCORED_SELECT}
+        {PHONE_SCORED_FROM}
+        WHERE  p.id != $1
+          AND  ($2::numeric IS NULL OR p.price_usd BETWEEN $2 AND $3)
+        ORDER  BY
+            CASE WHEN p.brand = $4 THEN 0 ELSE 1 END,
+            ABS(COALESCE(p.price_usd, 0) - COALESCE($5, 0)),
+            p.popularity DESC NULLS LAST
+        LIMIT  $6
+        """,
+        phone["id"], lo, hi, phone.get("brand"), price, _VALUE_PEER_LIMIT,
+    )
+    return rows_to_list(rows)
 
 
 @router.get("/search")
@@ -337,7 +352,9 @@ async def get_phone(phone_id: int):
         price = await _latest_price(conn, phone_id)
         _apply_latest_price(phone, price)
 
-    attach_computed_fields([phone])
+        peers = await _fetch_value_peers(conn, phone) if phone.get("smart_value_score") is None else []
+
+    attach_computed_fields([phone], peers=peers or [phone])
     phone["smart_score"] = _pop_smart_score(phone)
     return phone
 
@@ -383,16 +400,11 @@ async def price_history(
     phone_id: int,
     condition: str = Query(
         "new",
-        description="price_history row filter: 'new', 'used', or 'all'. "
-                     "price_history has one row per (date, condition) — "
-                     "without this filter a graph gets two overlapping "
-                     "series per day.",
+        description="price_history row filter: 'new', 'used', or 'all'.",
     ),
     scope: str = Query(
         "global",
-        description="price_points row filter: 'global', 'local', or 'all'. "
-                     "Same duplication issue as `condition`, one row per "
-                     "(date, scope).",
+        description="price_points row filter: 'global', 'local', or 'all'.",
     ),
 ):
     async with get_pool().acquire() as conn:
