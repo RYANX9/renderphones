@@ -81,7 +81,13 @@ def spec_score(p: dict) -> float:
 
 def compute_value_score(phone: dict, peers: list[dict]) -> float | None:
     """Specs-per-dollar, 0-10, normalised against the peer group's best
-    spec_score. Returns None if the phone or every peer lacks a price."""
+    spec_score. Returns None if the phone or every peer lacks a price.
+
+    `peers` must be a real comparison set — a peer group of size one
+    (the phone against itself) always normalises to 10.0, which is wrong.
+    Callers with only a single phone in hand must fetch a broader peer
+    set first (see routes/phones.py:get_phone).
+    """
     if not phone.get("price_usd") or not peers:
         return None
 
@@ -105,24 +111,31 @@ def normalize_popularity(raw: float | int | None, max_seen: float = 100.0) -> fl
     return round(max(0.0, min(val, max_seen)), 1)
 
 
-def attach_computed_fields(phones: list[dict]) -> list[dict]:
-    peers = phones
+def attach_computed_fields(phones: list[dict], peers: list[dict] | None = None) -> list[dict]:
+    """Mutates and returns `phones` in place: fills chipset_tier for every
+    row, and value_score using (in priority order) the AI smart-score
+    value_score, then a specs-per-dollar composite scored against `peers`
+    (defaults to `phones` itself — fine for list endpoints where the page
+    is a real comparison set, wrong for single-phone lookups).
+
+    Expects each dict to optionally carry `smart_value_score` (read, not
+    popped, here) from a `phone_smart_scores` join — callers building the
+    SELECT should alias it exactly that way. The caller is responsible for
+    popping it via routes/phones.py:_pop_smart_score AFTER this runs.
+    """
+    peer_set = peers if peers is not None else phones
     for p in phones:
         p["chipset_tier"] = chipset_tier(p.get("chipset"))
         p["popularity"] = normalize_popularity(p.get("popularity"))
 
-        smart_value = p.get("smart_value_score")  # was p.pop(...)
+        smart_value = p.get("smart_value_score")
         if smart_value is not None:
             p["value_score"] = round(float(smart_value), 1)
         elif p.get("value_score") is None:
-            p["value_score"] = compute_value_score(p, peers)
+            p["value_score"] = compute_value_score(p, peer_set)
     return phones
 
 
-# Expressions used by /phones/recommend to rank phones per selected
-# priority. Each yields roughly a 0-10 scale so priorities combine evenly.
-# Prefer the AI sub-score (s.*) when present; fall back to a spec-derived
-# proxy computed in SQL so unscored phones can still rank.
 PRIORITY_SQL_EXPR: dict[str, str] = {
     "camera":        "COALESCE(s.camera_score, LEAST(COALESCE(p.main_camera_mp, 0) / 20.0, 10))",
     "battery":       "COALESCE(s.battery_score, LEAST(COALESCE(p.battery_capacity, 0) / 600.0, 10))",
