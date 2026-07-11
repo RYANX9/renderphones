@@ -73,6 +73,7 @@ class PricePoint(BaseModel):
 
 class PriceHistoryPoint(BaseModel):
     snapshot_date: str
+    condition: Optional[str] = None
     min_price_usd: Optional[float] = None
     max_price_usd: Optional[float] = None
     avg_price_usd: Optional[float] = None
