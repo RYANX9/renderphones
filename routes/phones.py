@@ -33,7 +33,12 @@ _SMART_KEYS = (
 def _pop_smart_score(d: dict) -> Optional[dict]:
     """Pulls the smart_* columns (from the phone_smart_scores join) off a
     row dict and returns them as a nested SmartScore-shaped dict, or None
-    if the phone has never been scored. Mutates `d` in place."""
+    if the phone has never been scored. Mutates `d` in place.
+
+    Must be called AFTER attach_computed_fields — that function reads
+    smart_value_score off the same dict to compute value_score, and this
+    function removes it.
+    """
     has_score = d.get("smart_overall_score") is not None
     out = None
     if has_score:
@@ -96,6 +101,19 @@ async def _latest_price(conn, phone_id: int) -> Optional[dict]:
     return d
 
 
+def _apply_latest_price(target: dict, price: Optional[dict]) -> None:
+    """Overlays a price_points row onto a phone dict, but only when that
+    row actually carries a price. A row with a NULL price_usd (phone
+    currently untracked/out of stock) must not clobber the denormalised
+    phones.price_usd fallback."""
+    if price is None or price.get("price_usd") is None:
+        return
+    target["price_usd"] = price["price_usd"]
+    target["price_original"] = price.get("price_original")
+    target["price_updated_at"] = str(price["snapshot_date"])
+    target["price_scope"] = price["scope"]
+
+
 @router.get("/search")
 async def search_phones(
     q:                  Optional[str]   = Query(None),
@@ -151,9 +169,9 @@ async def search_phones(
         )
 
     phones = rows_to_list(rows)
-    for p in phones:
-        _pop_smart_score(p)
     attach_computed_fields(phones)
+    for p in phones:
+        p["smart_score"] = _pop_smart_score(p)
 
     return {
         "total":     total,
@@ -179,9 +197,9 @@ async def latest_phones(limit: int = Query(20, ge=1, le=100)):
                 """
             )
         phones = rows_to_list(rows)
-        for p in phones:
-            _pop_smart_score(p)
         attach_computed_fields(phones)
+        for p in phones:
+            p["smart_score"] = _pop_smart_score(p)
         return {"phones": phones}
 
     return await cached(f"phones:latest:{limit}", settings.cache_ttl_stable, _fetch)
@@ -204,9 +222,9 @@ async def trending_phones(limit: int = Query(10, ge=1, le=50)):
                 """
             )
         phones = rows_to_list(rows)
-        for p in phones:
-            _pop_smart_score(p)
         attach_computed_fields(phones)
+        for p in phones:
+            p["smart_score"] = _pop_smart_score(p)
         return {"phones": phones}
 
     return await cached(f"phones:trending:{limit}", settings.cache_ttl_trending, _fetch)
@@ -248,15 +266,13 @@ async def compare_phones(
 
         phones = rows_to_list(rows)
         for p in phones:
-            p["smart_score"] = _pop_smart_score(p)
             price = await _latest_price(conn, p["id"])
-            if price:
-                p["price_usd"] = float(price["price_usd"])
-                p["price_original"] = price.get("price_original")
-                p["price_updated_at"] = str(price["snapshot_date"])
-                p["price_scope"] = price["scope"]
+            _apply_latest_price(p, price)
 
     attach_computed_fields(phones)
+    for p in phones:
+        p["smart_score"] = _pop_smart_score(p)
+
     return {"phones": phones}
 
 
@@ -292,10 +308,12 @@ async def recommend_phones(
 
     phones = rows_to_list(rows)
     for p in phones:
-        _pop_smart_score(p)
         raw_match = p.pop("match_score", None)
         p["match_score"] = round(min(float(raw_match), 10.0), 1) if raw_match is not None else None
+
     attach_computed_fields(phones)
+    for p in phones:
+        p["smart_score"] = _pop_smart_score(p)
 
     return {"phones": phones, "priorities": priority_list}
 
@@ -315,16 +333,12 @@ async def get_phone(phone_id: int):
             raise HTTPException(status_code=404, detail=f"Phone {phone_id} not found.")
 
         phone = row_to_dict(row)
-        phone["smart_score"] = _pop_smart_score(phone)
 
         price = await _latest_price(conn, phone_id)
-        if price:
-            phone["price_usd"] = float(price["price_usd"])
-            phone["price_original"] = price.get("price_original")
-            phone["price_updated_at"] = str(price["snapshot_date"])
-            phone["price_scope"] = price["scope"]
+        _apply_latest_price(phone, price)
 
     attach_computed_fields([phone])
+    phone["smart_score"] = _pop_smart_score(phone)
     return phone
 
 
@@ -358,9 +372,9 @@ async def similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=30)):
         )
 
     phones = rows_to_list(rows)
-    for p in phones:
-        _pop_smart_score(p)
     attach_computed_fields(phones)
+    for p in phones:
+        p["smart_score"] = _pop_smart_score(p)
     return {"phones": phones}
 
 
