@@ -101,6 +101,36 @@ RELEASE_TS_EXPR = (
     "))::bigint"
 )
 
+# Used by routes/phones.py: every list/detail query there is
+# `FROM phones p LEFT JOIN phone_smart_scores s ON s.phone_id = p.id`,
+# so this pulls p.* plus release_ts plus the AI sub-scores, prefixed
+# `smart_*` so they never collide with a real phones column and can be
+# popped off cleanly by utils.scoring.attach_computed_fields /
+# routes/phones.py's own smart-score extraction.
+PHONE_SCORED_SELECT = (
+    "p.*, "
+    "EXTRACT(EPOCH FROM MAKE_DATE("
+    "  COALESCE(p.release_year, 1970),"
+    "  COALESCE(p.release_month, 1),"
+    "  COALESCE(p.release_day,  1)"
+    "))::bigint AS release_ts, "
+    "s.overall_score AS smart_overall_score, "
+    "s.value_score AS smart_value_score, "
+    "s.camera_score AS smart_camera_score, "
+    "s.performance_score AS smart_performance_score, "
+    "s.battery_score AS smart_battery_score, "
+    "s.display_score AS smart_display_score, "
+    "s.build_score AS smart_build_score, "
+    "s.strengths AS smart_strengths, "
+    "s.weaknesses AS smart_weaknesses, "
+    "s.reasoning AS smart_reasoning, "
+    "s.model_version AS smart_model_version, "
+    "s.scored_at AS smart_scored_at, "
+    "s.tier AS smart_tier"
+)
+
+PHONE_SCORED_FROM = "FROM phones p LEFT JOIN phone_smart_scores s ON s.phone_id = p.id"
+
 SORT_COL_MAP: dict[str, str] = {
     "release_year": RELEASE_TS_EXPR,
     "release_ts":   RELEASE_TS_EXPR,
@@ -109,4 +139,30 @@ SORT_COL_MAP: dict[str, str] = {
     "main_camera_mp":   "main_camera_mp",
     "antutu_score":     "antutu_score",
     "weight_g":         "weight_g",
+    "popularity":       "popularity",
+}
+
+RELEASE_TS_EXPR_P = (
+    "EXTRACT(EPOCH FROM MAKE_DATE("
+    "  COALESCE(p.release_year, 1970),"
+    "  COALESCE(p.release_month, 1),"
+    "  COALESCE(p.release_day,  1)"
+    "))::bigint"
+)
+
+# Sort columns valid only for the `p`/`s`-aliased queries in routes/phones.py
+# (they reference the phone_smart_scores join). Kept separate from
+# SORT_COL_MAP so brands.py / other unaliased queries can't be handed a
+# `s.` reference and blow up.
+SCORED_SORT_COL_MAP: dict[str, str] = {
+    "release_year":      RELEASE_TS_EXPR_P,
+    "release_ts":        RELEASE_TS_EXPR_P,
+    "price_usd":         "p.price_usd",
+    "battery_capacity":  "p.battery_capacity",
+    "main_camera_mp":    "p.main_camera_mp",
+    "antutu_score":      "p.antutu_score",
+    "weight_g":          "p.weight_g",
+    "popularity":        "p.popularity",
+    "overall_score":     "COALESCE(s.overall_score, 0)",
+    "value_score":       "COALESCE(s.value_score, 0)",
 }
