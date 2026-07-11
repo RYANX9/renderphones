@@ -106,21 +106,12 @@ def normalize_popularity(raw: float | int | None, max_seen: float = 100.0) -> fl
 
 
 def attach_computed_fields(phones: list[dict]) -> list[dict]:
-    """Mutates and returns `phones` in place: fills chipset_tier for every
-    row, and value_score using (in priority order) the AI smart-score
-    value_score, then a specs-per-dollar composite scored against the
-    other phones in this same result set as peers.
-
-    Expects each dict to optionally carry `smart_value_score` (popped here)
-    from a `phone_smart_scores` join — callers building the SELECT should
-    alias it exactly that way.
-    """
     peers = phones
     for p in phones:
         p["chipset_tier"] = chipset_tier(p.get("chipset"))
         p["popularity"] = normalize_popularity(p.get("popularity"))
 
-        smart_value = p.pop("smart_value_score", None)
+        smart_value = p.get("smart_value_score")  # was p.pop(...)
         if smart_value is not None:
             p["value_score"] = round(float(smart_value), 1)
         elif p.get("value_score") is None:
