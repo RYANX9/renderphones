@@ -12,8 +12,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 
-# p.* plus release_ts (as in PHONE_LIST_SELECT) plus the smart-score fields
-# worth surfacing on category listings. Aliased for the phones/phone_smart_scores join.
 _CATEGORY_COLS = """
     p.*,
     EXTRACT(EPOCH FROM MAKE_DATE(
@@ -22,27 +20,56 @@ _CATEGORY_COLS = """
         COALESCE(p.release_day, 1)
     ))::bigint AS release_ts,
     s.tier AS smart_tier,
-    s.overall_score AS smart_overall_score
+    s.overall_score AS smart_overall_score,
+    s.camera_score AS smart_camera_score,
+    s.performance_score AS smart_performance_score,
+    s.battery_score AS smart_battery_score,
+    s.display_score AS smart_display_score,
+    s.build_score AS smart_build_score,
+    s.value_score AS smart_value_score_full,
+    s.strengths AS smart_strengths,
+    s.weaknesses AS smart_weaknesses,
+    s.reasoning AS smart_reasoning,
+    s.model_version AS smart_model_version,
+    s.scored_at AS smart_scored_at
 """
+
+_SMART_KEYS = (
+    "smart_camera_score", "smart_performance_score", "smart_battery_score",
+    "smart_display_score", "smart_build_score", "smart_value_score_full",
+    "smart_strengths", "smart_weaknesses", "smart_reasoning",
+    "smart_model_version", "smart_scored_at",
+)
+
+
+def _pop_smart_score(d: dict) -> dict | None:
+    """Nests the AI sub-score fields into `smart_score`, leaving the flat
+    `smart_tier` / `smart_overall_score` columns on `d` untouched (existing
+    frontend contract). Returns None if the phone was never scored."""
+    has_score = d.get("smart_overall_score") is not None
+    out = None
+    if has_score:
+        out = {
+            "overall_score":     d.get("smart_overall_score"),
+            "camera_score":      d.get("smart_camera_score"),
+            "performance_score": d.get("smart_performance_score"),
+            "battery_score":     d.get("smart_battery_score"),
+            "display_score":     d.get("smart_display_score"),
+            "build_score":       d.get("smart_build_score"),
+            "value_score":       d.get("smart_value_score_full"),
+            "strengths":         d.get("smart_strengths"),
+            "weaknesses":        d.get("smart_weaknesses"),
+            "reasoning":         d.get("smart_reasoning"),
+            "tier":              d.get("smart_tier"),
+            "model_version":     d.get("smart_model_version"),
+            "scored_at":         d.get("smart_scored_at"),
+        }
+    for k in _SMART_KEYS:
+        d.pop(k, None)
+    return out
 
 
 def _category_sql(smart_expr: str, legacy_score_expr: str, where_clause: str) -> str:
-    """
-    Builds a CTE with two deferred placeholders filled at request time:
-      {cols}  — _CATEGORY_COLS
-      {limit} — the requested result count
-
-    Ranking logic:
-      1. candidates: every matching phone, with both the smart sub-score
-         (already 0-10) and the legacy raw formula score computed.
-      2. normalized: the legacy raw score is normalized to 0-10 across the
-         WHOLE candidate pool (not just the top N) so it lands on the same
-         scale as the smart sub-score before either is used to rank anyone.
-      3. blended_score = smart sub-score when the phone has been scored,
-         otherwise the normalized legacy score. Top N picked on this.
-      4. category_score: final 0-10 re-normalization within the top N, so
-         the #1 phone is always exactly 10.0 — same contract as before.
-    """
     return f"""
         WITH candidates AS (
             SELECT {{cols}},
@@ -263,12 +290,12 @@ async def get_category(
         phones = []
         for r in rows:
             d = row_to_dict(r)
-            # internal ranking scaffolding — not part of the public contract
             d.pop("smart_metric", None)
             d.pop("legacy_raw_score", None)
             d.pop("blended_score", None)
             raw_cs = d.pop("category_score", 0) or 0
             d["category_score"] = round(float(raw_cs), 2)
+            d["smart_score"] = _pop_smart_score(d)
             phones.append(d)
 
         return {
