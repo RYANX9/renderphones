@@ -63,21 +63,37 @@ def _resolve_sort(sort_by: str, sort_order: str) -> tuple[str, str]:
     return expr, order
 
 
+def _round_money(v) -> Optional[float]:
+    """Every price column comes out of Postgres as a numeric with float-noise
+    tails (1055.26729, 1489.8059999999998). Round once, at the API boundary,
+    to 2dp everywhere a price leaves this service."""
+    if v is None:
+        return None
+    return round(float(v), 2)
+
+
 async def _latest_price(conn, phone_id: int) -> Optional[dict]:
     """price_points is the source of truth for current pricing —
     phones.price_usd is a denormalised snapshot that can lag behind it.
-    Picks the most recent snapshot, preferring 'global' scope on ties."""
+    'global' scope is the canonical price; only fall back to 'local' rows
+    if the phone has never had a global snapshot at all. Within whichever
+    scope wins, pick the most recent snapshot_date."""
     row = await conn.fetchrow(
         """
         SELECT price_usd, price_original, scope, snapshot_date
         FROM   price_points
         WHERE  phone_id = $1
-        ORDER  BY snapshot_date DESC, (scope = 'global') DESC
+        ORDER  BY (scope = 'global') DESC, snapshot_date DESC
         LIMIT  1
         """,
         phone_id,
     )
-    return row_to_dict(row) if row else None
+    if not row:
+        return None
+    d = row_to_dict(row)
+    d["price_usd"] = _round_money(d["price_usd"])
+    d["price_original"] = _round_money(d.get("price_original"))
+    return d
 
 
 @router.get("/search")
@@ -349,33 +365,83 @@ async def similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=30)):
 
 
 @router.get("/{phone_id}/price-history")
-async def price_history(phone_id: int):
+async def price_history(
+    phone_id: int,
+    condition: str = Query(
+        "new",
+        description="price_history row filter: 'new', 'used', or 'all'. "
+                     "price_history has one row per (date, condition) — "
+                     "without this filter a graph gets two overlapping "
+                     "series per day.",
+    ),
+    scope: str = Query(
+        "global",
+        description="price_points row filter: 'global', 'local', or 'all'. "
+                     "Same duplication issue as `condition`, one row per "
+                     "(date, scope).",
+    ),
+):
     async with get_pool().acquire() as conn:
         exists = await conn.fetchval("SELECT 1 FROM phones WHERE id = $1", phone_id)
         if not exists:
             raise HTTPException(status_code=404, detail=f"Phone {phone_id} not found.")
 
-        history_rows = await conn.fetch(
-            """
-            SELECT snapshot_date, min_price_usd, max_price_usd, avg_price_usd, listing_count
-            FROM   price_history
-            WHERE  phone_id = $1
-            ORDER  BY snapshot_date ASC
-            """,
-            phone_id,
-        )
-        point_rows = await conn.fetch(
-            """
-            SELECT snapshot_date, scope, price_usd
-            FROM   price_points
-            WHERE  phone_id = $1
-            ORDER  BY snapshot_date ASC
-            """,
-            phone_id,
-        )
+        if condition == "all":
+            history_rows = await conn.fetch(
+                """
+                SELECT snapshot_date, condition, min_price_usd, max_price_usd,
+                       avg_price_usd, listing_count
+                FROM   price_history
+                WHERE  phone_id = $1
+                ORDER  BY snapshot_date ASC, condition ASC
+                """,
+                phone_id,
+            )
+        else:
+            history_rows = await conn.fetch(
+                """
+                SELECT snapshot_date, condition, min_price_usd, max_price_usd,
+                       avg_price_usd, listing_count
+                FROM   price_history
+                WHERE  phone_id = $1 AND condition = $2
+                ORDER  BY snapshot_date ASC
+                """,
+                phone_id, condition,
+            )
+
+        if scope == "all":
+            point_rows = await conn.fetch(
+                """
+                SELECT snapshot_date, scope, price_usd
+                FROM   price_points
+                WHERE  phone_id = $1
+                ORDER  BY snapshot_date ASC, scope ASC
+                """,
+                phone_id,
+            )
+        else:
+            point_rows = await conn.fetch(
+                """
+                SELECT snapshot_date, scope, price_usd
+                FROM   price_points
+                WHERE  phone_id = $1 AND scope = $2
+                ORDER  BY snapshot_date ASC
+                """,
+                phone_id, scope,
+            )
+
+    points = rows_to_list(history_rows)
+    for pt in points:
+        pt["min_price_usd"] = _round_money(pt.get("min_price_usd"))
+        pt["max_price_usd"] = _round_money(pt.get("max_price_usd"))
+        pt["avg_price_usd"] = _round_money(pt.get("avg_price_usd"))
+
+    price_pts = rows_to_list(point_rows)
+    for pp in price_pts:
+        pp["price_usd"] = _round_money(pp.get("price_usd"))
 
     return {
         "phone_id": phone_id,
-        "points": rows_to_list(history_rows),
-        "price_points": rows_to_list(point_rows),
+        "points": points,
+        "price_points": price_pts,
     }
