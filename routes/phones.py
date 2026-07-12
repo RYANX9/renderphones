@@ -18,7 +18,7 @@ from database import (
 )
 from utils.query import build_search_where
 from utils.scoring import attach_computed_fields, PRIORITY_SQL_EXPR
-from recommend_copy import generate_match_copy
+from .recommend_copy import generate_match_copy
 from compare_copy import generate_compare_verdict
 
 logger = logging.getLogger(__name__)
