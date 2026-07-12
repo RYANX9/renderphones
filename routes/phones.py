@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import anyio
 from fastapi import APIRouter, HTTPException, Query
 
 from cache import cached
@@ -17,6 +18,8 @@ from database import (
 )
 from utils.query import build_search_where
 from utils.scoring import attach_computed_fields, PRIORITY_SQL_EXPR
+from recommend_copy import generate_match_copy
+from compare_copy import generate_compare_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +32,18 @@ _SMART_KEYS = (
     "smart_reasoning", "smart_model_version", "smart_scored_at", "smart_tier",
 )
 
-# Peer-group size used to normalise the value_score fallback for a single
-# phone lookup (get_phone). Must be called AFTER attach_computed_fields —
-# that function reads smart_value_score off the same dict to compute
-# value_score, and _pop_smart_score removes it.
 _VALUE_PEER_LIMIT = 40
+
+_PRIORITY_LABEL = {
+    "camera": "Camera Quality",
+    "battery": "Battery Life",
+    "performance": "Performance",
+    "compact": "Compact Size",
+    "lightweight": "Lightweight",
+    "display": "Display Quality",
+    "fast_charging": "Fast Charging",
+    "value": "Best Value",
+}
 
 
 def _pop_smart_score(d: dict) -> Optional[dict]:
@@ -92,9 +102,6 @@ async def _latest_price(conn, phone_id: int) -> Optional[dict]:
 
 
 def _apply_latest_price(target: dict, price: Optional[dict]) -> None:
-    """A price_points row with a NULL price_usd (phone currently
-    untracked / out of stock) must not clobber the denormalised
-    phones.price_usd fallback."""
     if price is None or price.get("price_usd") is None:
         return
     target["price_usd"] = price["price_usd"]
@@ -104,10 +111,6 @@ def _apply_latest_price(target: dict, price: Optional[dict]) -> None:
 
 
 async def _fetch_value_peers(conn, phone: dict) -> list[dict]:
-    """Real comparison set for the value_score fallback on a single-phone
-    lookup — same price-band-plus-brand logic as /similar, so the number
-    shown on the detail page is computed the same way as on list pages
-    instead of degenerating to a peer group of one."""
     price = phone.get("price_usd")
     lo = price * 0.65 if price else None
     hi = price * 1.45 if price else None
@@ -288,7 +291,11 @@ async def compare_phones(
     for p in phones:
         p["smart_score"] = _pop_smart_score(p)
 
-    return {"phones": phones}
+    verdict = None
+    if len(phones) >= 2:
+        verdict = await anyio.to_thread.run_sync(generate_compare_verdict, phones)
+
+    return {"phones": phones, "verdict": verdict}
 
 
 @router.get("/recommend")
@@ -329,6 +336,26 @@ async def recommend_phones(
     attach_computed_fields(phones)
     for p in phones:
         p["smart_score"] = _pop_smart_score(p)
+
+    priority_labels = [_PRIORITY_LABEL.get(p, p) for p in priority_list]
+    if min_price and max_price:
+        budget_label = f"${min_price:.0f}-${max_price:.0f}"
+    elif max_price:
+        budget_label = f"under ${max_price:.0f}"
+    elif min_price:
+        budget_label = f"${min_price:.0f}+"
+    else:
+        budget_label = "any budget"
+
+    match_copy = await anyio.to_thread.run_sync(
+        generate_match_copy, phones, priority_list, budget_label
+    )
+    if match_copy:
+        for p in phones:
+            copy = match_copy.get(p["id"])
+            if copy:
+                p["match_line"] = copy["match_line"]
+                p["tradeoff_line"] = copy["tradeoff_line"]
 
     return {"phones": phones, "priorities": priority_list}
 
