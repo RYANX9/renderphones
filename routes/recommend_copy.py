@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from gemini_client import call
+from utils.gemini_client import call
+
 
 _PRIORITY_LABEL = {
     "camera": "camera quality",
