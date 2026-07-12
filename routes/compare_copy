@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gemini_client import call
+from utils.gemini_client import call
 
 _SCHEMA = {
     "type": "object",
