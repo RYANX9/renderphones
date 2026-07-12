@@ -9,7 +9,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDNGGibtMyKnhEAm8f6idzCzEdoXe-qMCE")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyClVUcn1OMKaCBXXDWsNOImNU9yD1fhBCk")
 MODEL_NAME = "gemini-3.1-flash-lite"  # fixed per requirement, do not change
 
 _ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
