@@ -9,7 +9,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6IahIF2BSG7yyACBKRu3mRThzhcbnuiGcv5fjLAdSeyUg")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:    
+    raise RuntimeError("GEMINI_API_KEY environment variable is not set")
 MODEL_NAME = "gemini-3.1-flash-lite"  # fixed per requirement, do not change
 
 _ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
