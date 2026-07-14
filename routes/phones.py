@@ -311,13 +311,25 @@ async def compare_phones(
     return {"phones": phones, "verdict": verdict}
 
 
+_TIER_BOUNDS: dict[str, tuple[float, float | None]] = {
+    "s": (1000, None),
+    "a": (700, 999),
+    "b": (400, 699),
+    "c": (200, 399),
+    "d": (0, 199),
+}
+
 @router.get("/recommend")
 async def recommend_phones(
     priorities: str = Query(..., description="Comma-separated priority ids"),
+    tier:       Optional[str]   = Query(None, description="s|a|b|c|d — overrides min_price/max_price when set"),
     min_price:  Optional[float] = Query(None),
     max_price:  Optional[float] = Query(None),
     limit:      int = Query(5, ge=1, le=20),
 ):
+    if tier and tier in _TIER_BOUNDS:
+        min_price, max_price = _TIER_BOUNDS[tier]
+
     priority_list = [p.strip() for p in priorities.split(",") if p.strip() in PRIORITY_SQL_EXPR]
     if not priority_list:
         raise HTTPException(status_code=400, detail="No valid priorities provided.")
@@ -372,7 +384,7 @@ async def recommend_phones(
                 p["tradeoff_line"] = copy["tradeoff_line"]
 
     return {"phones": phones, "priorities": priority_list}
-
+    
 
 @router.get("/{phone_id}")
 async def get_phone(phone_id: int):
