@@ -17,7 +17,7 @@ from database import (
     SCORED_SORT_COL_MAP,
 )
 from utils.query import build_search_where
-from utils.scoring import attach_computed_fields, PRIORITY_SQL_EXPR
+from utils.scoring import attach_computed_fields, PRIORITY_SQL_EXPR, HARD_FILTER_PRIORITIES
 from .recommend_copy import generate_match_copy
 from .compare_copy import generate_compare_verdict
 
@@ -42,10 +42,15 @@ _PRIORITY_LABEL = {
     "camera": "Camera Quality",
     "battery": "Battery Life",
     "performance": "Performance",
+    "gaming": "Gaming Performance",
     "compact": "Compact Size",
     "lightweight": "Lightweight",
     "display": "Display Quality",
+    "smooth_display": "High Refresh Rate",
     "fast_charging": "Fast Charging",
+    "wireless_charging": "Wireless Charging",
+    "foldable": "Foldable Design",
+    "durability": "Water/Dust Resistance",
     "value": "Best Value",
 }
 
@@ -319,6 +324,24 @@ _TIER_BOUNDS: dict[str, tuple[float, float | None]] = {
     "d": (0, 199),
 }
 
+# Price-band relaxation steps tried, in order, ONLY when a hard filter (e.g.
+# foldable) leaves fewer than `limit` matches inside the requested budget.
+# None on the last step means "drop the price filter entirely." A soft-only
+# search NEVER widens — returning 3 phones instead of 5 for a sparse category
+# is an honest signal about the catalog, not a problem to paper over.
+_WIDEN_STEPS: tuple[float | None, ...] = (0.0, 0.20, 0.40, None)
+
+
+def _widen_bounds(
+    min_price: Optional[float], max_price: Optional[float], factor: Optional[float]
+) -> tuple[Optional[float], Optional[float]]:
+    if factor is None:
+        return None, None
+    new_min = None if min_price is None else max(0.0, min_price * (1 - factor))
+    new_max = None if max_price is None else max_price * (1 + factor)
+    return new_min, new_max
+
+
 @router.get("/recommend")
 async def recommend_phones(
     priorities: str = Query(..., description="Comma-separated priority ids"),
@@ -330,51 +353,92 @@ async def recommend_phones(
     if tier and tier in _TIER_BOUNDS:
         min_price, max_price = _TIER_BOUNDS[tier]
 
-    priority_list = [p.strip() for p in priorities.split(",") if p.strip() in PRIORITY_SQL_EXPR]
-    if not priority_list:
+    requested_min, requested_max = min_price, max_price
+
+    all_ids  = [p.strip() for p in priorities.split(",") if p.strip()]
+    hard_ids = [p for p in all_ids if p in HARD_FILTER_PRIORITIES]
+    soft_ids = [p for p in all_ids if p in PRIORITY_SQL_EXPR]
+
+    if not hard_ids and not soft_ids:
         raise HTTPException(status_code=400, detail="No valid priorities provided.")
 
-    combined_expr = " + ".join(PRIORITY_SQL_EXPR[p] for p in priority_list)
+    hard_clause = " AND ".join(HARD_FILTER_PRIORITIES[h] for h in hard_ids)
 
-    where, params = build_search_where(min_price=min_price, max_price=max_price)
-    i = len(params) + 1
+    if soft_ids:
+        # Average, not sum: keeps match_score a true 0-10 regardless of how
+        # many priorities were picked, so it never needs post-hoc clamping
+        # (the old min(raw_sum, 10.0) is why every result showed "10.0/10" —
+        # a sum of 2-3 uncapped 0-10 terms crosses 10 almost immediately).
+        combined_expr = "(" + " + ".join(PRIORITY_SQL_EXPR[p] for p in soft_ids) + f") / {len(soft_ids)}.0"
+        order_by = "match_score DESC NULLS LAST, p.popularity DESC NULLS LAST, p.id DESC"
+    else:
+        combined_expr = "NULL::numeric"
+        order_by = "COALESCE(s.overall_score, 0) DESC, p.popularity DESC NULLS LAST, p.id DESC"
+
+    widen_level = 0
+    phones: list[dict] = []
+    effective_min, effective_max = requested_min, requested_max
 
     async with get_pool().acquire() as conn:
-        rows = await conn.fetch(
-            f"""
-            SELECT {PHONE_SCORED_SELECT},
-                   ({combined_expr}) AS match_score
-            {PHONE_SCORED_FROM}
-            WHERE  {where}
-            ORDER  BY match_score DESC NULLS LAST, p.popularity DESC NULLS LAST, p.id DESC
-            LIMIT  ${i}
-            """,
-            *params,
-            limit,
-        )
+        for step_idx, factor in enumerate(_WIDEN_STEPS):
+            trial_min, trial_max = _widen_bounds(requested_min, requested_max, factor)
 
-    phones = rows_to_list(rows)
+            where, params = build_search_where(min_price=trial_min, max_price=trial_max)
+            if hard_clause:
+                where = f"{where} AND {hard_clause}"
+            i = len(params) + 1
+
+            rows = await conn.fetch(
+                f"""
+                SELECT {PHONE_SCORED_SELECT},
+                       ({combined_expr}) AS match_score
+                {PHONE_SCORED_FROM}
+                WHERE  {where}
+                ORDER  BY {order_by}
+                LIMIT  ${i}
+                """,
+                *params,
+                limit,
+            )
+            phones = rows_to_list(rows)
+            effective_min, effective_max = trial_min, trial_max
+            widen_level = step_idx
+
+            # Only a hard filter justifies widening the budget. A soft-only
+            # search stops after one pass no matter how few rows come back.
+            if not hard_ids or len(phones) >= limit or factor is None:
+                break
+
     for p in phones:
         raw_match = p.pop("match_score", None)
         p["match_score"] = round(min(float(raw_match), 10.0), 1) if raw_match is not None else None
+        price = p.get("price_usd")
+        p["in_requested_budget"] = (
+            price is None
+            or (
+                (requested_min is None or price >= requested_min)
+                and (requested_max is None or price <= requested_max)
+            )
+        )
 
     attach_computed_fields(phones)
     for p in phones:
         p["smart_score"] = _pop_smart_score(p)
 
-    priority_labels = [_PRIORITY_LABEL.get(p, p) for p in priority_list]
-    if min_price and max_price:
-        budget_label = f"${min_price:.0f}-${max_price:.0f}"
-    elif max_price:
-        budget_label = f"under ${max_price:.0f}"
-    elif min_price:
-        budget_label = f"${min_price:.0f}+"
+    ordered_ids = hard_ids + soft_ids
+    priority_labels = [_PRIORITY_LABEL.get(p, p) for p in ordered_ids]
+    if requested_min and requested_max:
+        budget_label = f"${requested_min:.0f}-${requested_max:.0f}"
+    elif requested_max:
+        budget_label = f"under ${requested_max:.0f}"
+    elif requested_min:
+        budget_label = f"${requested_min:.0f}+"
     else:
         budget_label = "any budget"
 
     # Blocking HTTP call to Gemini — offloaded to a worker thread.
     match_copy = await anyio.to_thread.run_sync(
-        generate_match_copy, phones, priority_list, budget_label
+        generate_match_copy, phones, ordered_ids, budget_label
     )
     if match_copy:
         for p in phones:
@@ -383,8 +447,16 @@ async def recommend_phones(
                 p["match_line"] = copy["match_line"]
                 p["tradeoff_line"] = copy["tradeoff_line"]
 
-    return {"phones": phones, "priorities": priority_list}
-    
+    return {
+        "phones": phones,
+        "priorities": ordered_ids,
+        "hard_filters": hard_ids,
+        "requested_price_range": {"min": requested_min, "max": requested_max},
+        "effective_price_range": {"min": effective_min, "max": effective_max},
+        "budget_widened": widen_level > 0,
+        "insufficient_matches": len(phones) < limit,
+    }
+
 
 @router.get("/{phone_id}")
 async def get_phone(phone_id: int):
