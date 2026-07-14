@@ -137,7 +137,12 @@ def attach_computed_fields(phones: list[dict], peers: list[dict] | None = None) 
 
 
 PRIORITY_SQL_EXPR: dict[str, str] = {
-    "camera":        "COALESCE(s.camera_score, LEAST(COALESCE(p.main_camera_mp, 0) / 20.0, 10))",
+    "camera": (
+        "COALESCE(s.camera_score, "
+        "LEAST(COALESCE(p.main_camera_mp, 0) / 20.0, 10) "
+        "+ CASE WHEN p.has_ois THEN 1.0 ELSE 0 END "
+        "+ CASE WHEN p.optical_zoom IS NOT NULL THEN 1.0 ELSE 0 END)"
+    ),
     "battery":       "COALESCE(s.battery_score, LEAST(COALESCE(p.battery_capacity, 0) / 600.0, 10))",
     "performance":   "COALESCE(s.performance_score, LEAST(COALESCE(p.antutu_score, 0) / 150000.0, 10))",
     "compact":       "GREATEST(0, 10 - (COALESCE(p.screen_size, 6.5) - 5.5) * 4)",
@@ -145,4 +150,20 @@ PRIORITY_SQL_EXPR: dict[str, str] = {
     "display":       "COALESCE(s.display_score, 6.0)",
     "fast_charging": "LEAST(COALESCE(p.fast_charging_w, 0) / 10.0, 10)",
     "value":         "COALESCE(s.value_score, 6.0)",
+    "gaming": (
+        "CASE WHEN p.is_premium_gaming THEN 10 "
+        "ELSE COALESCE(s.performance_score, LEAST(COALESCE(p.antutu_score, 0) / 150000.0, 10)) END"
+    ),
+    "foldable": "CASE WHEN p.is_foldable THEN 10 ELSE 0 END",
+    "wireless_charging": (
+        "CASE WHEN p.has_wireless_charging "
+        "THEN LEAST(COALESCE(p.wireless_charging_w, 10) / 15.0, 10) ELSE 0 END"
+    ),
+    "durability": (
+        "CASE "
+        "WHEN p.water_resistance ILIKE '%IP68%' THEN 10 "
+        "WHEN p.water_resistance ILIKE '%IP6%' OR p.water_resistance ILIKE '%IP5%' THEN 7 "
+        "ELSE 3 END"
+    ),
+    "smooth_display": "LEAST(COALESCE(p.refresh_rate_hz, 60) / 12.0, 10)",
 }
