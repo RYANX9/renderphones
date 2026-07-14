@@ -9,10 +9,15 @@ _PRIORITY_LABEL = {
     "camera": "camera quality",
     "battery": "battery life",
     "performance": "performance",
+    "gaming": "gaming performance",
     "compact": "compact size",
     "lightweight": "low weight",
     "display": "display quality",
+    "smooth_display": "high refresh rate",
     "fast_charging": "fast charging",
+    "wireless_charging": "wireless charging",
+    "foldable": "foldable design",
+    "durability": "water/dust resistance",
     "value": "best value",
 }
 
@@ -41,6 +46,7 @@ def _phone_summary(p: dict[str, Any]) -> str:
         f"id={p['id']}",
         f"name={p.get('brand', '')} {p.get('model_name', '')}",
         f"price=${p['price_usd']:.0f}" if p.get("price_usd") else "price=unknown",
+        "within_requested_budget=NO" if p.get("in_requested_budget") is False else None,
         f"camera={p['main_camera_mp']}MP" if p.get("main_camera_mp") else None,
         f"battery={p['battery_capacity']}mAh" if p.get("battery_capacity") else None,
         f"chipset={p['chipset']}" if p.get("chipset") else None,
@@ -68,12 +74,12 @@ def generate_match_copy(
 
     prompt = f"""A shopper set a budget of {budget_label} and said these priorities matter most: {', '.join(priority_labels)}.
 
-Here are the phones matched to them, one per line:
+Here are the phones matched to them, one per line. Some may be marked within_requested_budget=NO — those fell outside the stated budget because too few phones satisfied every requirement inside it:
 {phone_lines}
 
 For each phone, write two short plain-sentence lines a shopper would read on a comparison card:
 - match_line: one sentence (max 22 words) explaining why this phone fits their stated priorities, using its actual specs. Direct and concrete, no hedging, no filler like "this phone offers".
-- tradeoff_line: one sentence (max 18 words) naming the clearest compromise versus their priorities or budget. If there's no real compromise, describe the weakest relative spec plainly.
+- tradeoff_line: one sentence (max 18 words) naming the clearest compromise versus their priorities or budget. If a phone is marked within_requested_budget=NO, the tradeoff_line MUST say so explicitly using its actual price — never invent an unrelated compromise instead. Otherwise, if there's no real compromise, describe the weakest relative spec plainly.
 
 Write in plain, confident, editorial tone. Never mention scores, algorithms, models, or that this text was generated."""
 
