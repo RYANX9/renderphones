@@ -154,7 +154,6 @@ PRIORITY_SQL_EXPR: dict[str, str] = {
         "CASE WHEN p.is_premium_gaming THEN 10 "
         "ELSE COALESCE(s.performance_score, LEAST(COALESCE(p.antutu_score, 0) / 150000.0, 10)) END"
     ),
-    "foldable": "CASE WHEN p.is_foldable THEN 10 ELSE 0 END",
     "wireless_charging": (
         "CASE WHEN p.has_wireless_charging "
         "THEN LEAST(COALESCE(p.wireless_charging_w, 10) / 15.0, 10) ELSE 0 END"
@@ -166,4 +165,14 @@ PRIORITY_SQL_EXPR: dict[str, str] = {
         "ELSE 3 END"
     ),
     "smooth_display": "LEAST(COALESCE(p.refresh_rate_hz, 60) / 12.0, 10)",
+}
+
+# Priorities that gate results (SQL WHERE) instead of contributing to the
+# weighted match_score. A binary trait like "foldable" has no middle ground —
+# blending it additively with continuous priorities let a non-foldable phone
+# that scored well on two other priorities out-rank or tie one that actually
+# folds. IS TRUE (not truthy) deliberately excludes NULL: most of the catalog
+# is unenriched for this column, and "never checked" must never pass as "yes."
+HARD_FILTER_PRIORITIES: dict[str, str] = {
+    "foldable": "p.is_foldable IS TRUE",
 }
