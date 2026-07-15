@@ -471,25 +471,34 @@ async def recommend_phones(
 
 
 @router.get("/{phone_id}")
-async def get_phone(phone_id: int):
+async def get_phone(phone_id: str): # Change type hint to str to accept slug
     async with get_pool().acquire() as conn:
+        # Check if input is an ID (integer) or a Slug (string)
+        if phone_id.isdigit():
+            where_clause = "p.id = $1"
+            param = int(phone_id)
+        else:
+            where_clause = "p.slug = $1"
+            param = phone_id
+
         row = await conn.fetchrow(
             f"""
             SELECT {PHONE_SCORED_SELECT}
             {PHONE_SCORED_FROM}
-            WHERE  p.id = $1
+            WHERE  {where_clause}
             """,
-            phone_id,
+            param,
         )
+        
         if row is None:
             raise HTTPException(status_code=404, detail=f"Phone {phone_id} not found.")
 
         phone = row_to_dict(row)
 
-        # Use the slug from the phone row to fetch variants
-        phone["variants"] = await _fetch_variants(conn, phone["slug"])
+        # Now you can use the ID from the fetched row to get variants
+        phone["variants"] = await _fetch_variants(conn, phone["id"])
 
-        price = await _latest_price(conn, phone_id)
+        price = await _latest_price(conn, phone["id"])
         _apply_latest_price(phone, price)
 
         peers = await _fetch_value_peers(conn, phone) if phone.get("smart_value_score") is None else []
