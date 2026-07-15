@@ -122,9 +122,10 @@ def _apply_latest_price(target: dict, price: Optional[dict]) -> None:
     target["price_scope"] = price["scope"]
 
 async def _fetch_variants(conn, phone_id: int) -> list[dict]:
+    # Now you can query directly by phone_id
     rows = await conn.fetch(
         """
-        SELECT ram_gb, storage_gb, price, url, image_urls
+        SELECT ram_gb, storage_gb, price, url
         FROM phone_variants
         WHERE phone_id = $1
         ORDER BY storage_gb ASC
@@ -485,7 +486,8 @@ async def get_phone(phone_id: int):
 
         phone = row_to_dict(row)
 
-        phone["variants"] = await _fetch_variants(conn, phone_id)
+        # Use the slug from the phone row to fetch variants
+        phone["variants"] = await _fetch_variants(conn, phone["slug"])
 
         price = await _latest_price(conn, phone_id)
         _apply_latest_price(phone, price)
@@ -505,7 +507,9 @@ async def get_phone_variants(phone_id: int):
         if not exists:
             raise HTTPException(status_code=404, detail=f"Phone {phone_id} not found.")
             
+        # This now uses the phone_id column we added to phone_variants
         variants = await _fetch_variants(conn, phone_id)
+        
     return {"phone_id": phone_id, "variants": variants}
     
 
