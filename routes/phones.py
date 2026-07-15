@@ -121,6 +121,17 @@ def _apply_latest_price(target: dict, price: Optional[dict]) -> None:
     target["price_updated_at"] = str(price["snapshot_date"])
     target["price_scope"] = price["scope"]
 
+async def _fetch_variants(conn, phone_id: int) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT ram_gb, storage_gb, price, url, image_urls
+        FROM phone_variants
+        WHERE phone_id = $1
+        ORDER BY storage_gb ASC
+        """,
+        phone_id,
+    )
+    return rows_to_list(rows)
 
 async def _fetch_value_peers(conn, phone: dict) -> list[dict]:
     """Real comparison set for the value_score fallback on a single-phone
@@ -474,6 +485,8 @@ async def get_phone(phone_id: int):
 
         phone = row_to_dict(row)
 
+        phone["variants"] = await _fetch_variants(conn, phone_id)
+
         price = await _latest_price(conn, phone_id)
         _apply_latest_price(phone, price)
 
@@ -482,7 +495,19 @@ async def get_phone(phone_id: int):
     attach_computed_fields([phone], peers=peers or [phone])
     phone["smart_score"] = _pop_smart_score(phone)
     return phone
+    
 
+@router.get("/{phone_id}/variants")
+async def get_phone_variants(phone_id: int):
+    async with get_pool().acquire() as conn:
+        # Verify phone exists
+        exists = await conn.fetchval("SELECT 1 FROM phones WHERE id = $1", phone_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Phone {phone_id} not found.")
+            
+        variants = await _fetch_variants(conn, phone_id)
+    return {"phone_id": phone_id, "variants": variants}
+    
 
 @router.get("/{phone_id}/similar")
 async def similar_phones(phone_id: int, limit: int = Query(12, ge=1, le=30)):
