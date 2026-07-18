@@ -2,24 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from utils.gemini_client import call
-
-
-_PRIORITY_LABEL = {
-    "camera": "camera quality",
-    "battery": "battery life",
-    "performance": "performance",
-    "gaming": "gaming performance",
-    "compact": "compact size",
-    "lightweight": "low weight",
-    "display": "display quality",
-    "smooth_display": "high refresh rate",
-    "fast_charging": "fast charging",
-    "wireless_charging": "wireless charging",
-    "foldable": "foldable design",
-    "durability": "water/dust resistance",
-    "value": "best value",
-}
+from ..core.ai_client import call
+from ..core.scoring import PRIORITY_LABELS
 
 _SCHEMA = {
     "type": "object",
@@ -50,10 +34,12 @@ def _phone_summary(p: dict[str, Any]) -> str:
         f"camera={p['main_camera_mp']}MP" if p.get("main_camera_mp") else None,
         f"battery={p['battery_capacity']}mAh" if p.get("battery_capacity") else None,
         f"chipset={p['chipset']}" if p.get("chipset") else None,
-        f"chipset_tier={p['chipset_tier']}" if p.get("chipset_tier") else None,
+        f"tier={p['chipset_tier']['id']}" if p.get("chipset_tier") else None,
         f"charging={p['fast_charging_w']}W" if p.get("fast_charging_w") else None,
         f"screen={p['screen_size']}in" if p.get("screen_size") else None,
         f"weight={p['weight_g']}g" if p.get("weight_g") else None,
+        "foldable=yes" if p.get("is_foldable") else None,
+        "wireless_charging=yes" if p.get("has_wireless_charging") else None,
     ]
     return " | ".join(f for f in fields if f)
 
@@ -63,13 +49,10 @@ def generate_match_copy(
     priorities: list[str],
     budget_label: str,
 ) -> dict[int, dict[str, str]] | None:
-    """One call covering every recommended phone. Returns
-    {phone_id: {match_line, tradeoff_line}} or None if the call failed —
-    caller falls back to the existing spec-based logic."""
     if not phones:
         return None
 
-    priority_labels = [_PRIORITY_LABEL.get(p, p) for p in priorities]
+    priority_labels = [PRIORITY_LABELS.get(p, p) for p in priorities]
     phone_lines = "\n".join(_phone_summary(p) for p in phones)
 
     prompt = f"""A shopper set a budget of {budget_label} and said these priorities matter most: {', '.join(priority_labels)}.

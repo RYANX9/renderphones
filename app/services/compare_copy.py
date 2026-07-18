@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from utils.gemini_client import call
+from ..core.ai_client import call
 
 _SCHEMA = {
     "type": "object",
@@ -42,8 +42,6 @@ def _phone_summary(p: dict[str, Any]) -> str:
 
 
 def generate_compare_verdict(phones: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """One call across the exact set of phones being compared. Returns
-    {verdict, picks: [{id, for_label, reason}]} or None on failure."""
     if len(phones) < 2:
         return None
 

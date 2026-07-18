@@ -7,13 +7,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from config import get_settings
-from database import create_pool, close_pool
-from middleware import RequestContextMiddleware, RateLimitMiddleware
-from routes.brands import router as brands_router
-from routes.categories import router as categories_router
-from routes.phones import router as phones_router
-from routes.misc import router as misc_router
+from app.core.config import get_settings
+from app.core.database import create_pool, close_pool
+from app.core.middleware import RequestContextMiddleware, RateLimitMiddleware
+from app.routes.phones import router as phones_router
+from app.routes.brands import router as brands_router
+from app.routes.categories import router as categories_router
+from app.routes.misc import router as misc_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,12 +32,17 @@ async def lifespan(app: FastAPI):
         max_size=settings.db_pool_max,
         command_timeout=settings.db_command_timeout,
     )
+    # trigram similarity (used by search's typo-tolerant matching) needs
+    # this extension enabled once per database.
+    from app.core.database import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     yield
     await close_pool()
 
 
 app = FastAPI(
-    title="Mobylite API",
+    title="Specmob API",
     version=settings.app_version,
     lifespan=lifespan,
 )
@@ -57,11 +62,6 @@ app.add_middleware(
 )
 
 
-# CORSMiddleware does not reliably inject headers on responses produced by
-# exception handlers because the handler short-circuits the ASGI middleware
-# chain before CORS processing can run.  We set the headers explicitly here,
-# exactly as the original fapi.py did, so the browser never sees a
-# CORS-blocked error response regardless of what went wrong server-side.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)

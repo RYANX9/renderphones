@@ -15,23 +15,20 @@ class Settings(BaseSettings):
     database_url: str
 
     db_pool_min: int = 2
-    db_pool_max: int = 10
+    db_pool_max: int = 15
     db_command_timeout: float = 30.0
 
     cache_ttl_trending: int = 900
     cache_ttl_stable: int = 3_600
-    cache_ttl_phone_detail: int = 86_400
+    cache_ttl_phone_detail: int = 21_600
 
-    rate_limit_requests: int = 120
+    rate_limit_requests: int = 180
     rate_limit_window: int = 60
 
-    # "*" matches the original fapi.py behaviour (allow_origins=["*"]).
-    # Set CORS_ORIGINS in the environment to restrict to specific origins
-    # once you are ready to tighten this up (e.g. "https://mobylite.vercel.app").
     cors_origins: str = "*"
 
     debug: bool = False
-    app_version: str = "2.0.0"
+    app_version: str = "3.0.0"
 
     @property
     def cors_origins_list(self) -> list[str]:

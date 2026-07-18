@@ -84,7 +84,6 @@ cache: TTLCache = TTLCache()
 
 
 async def cached(key: str, ttl: int, fn: Callable[[], Awaitable[T]]) -> T:
-    """Return cached result or call fn(), cache, and return."""
     hit = await cache.get(key)
     if hit is not None:
         return hit  # type: ignore[return-value]

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
-import logging
 from collections import defaultdict, deque
 from typing import Callable
 
@@ -17,8 +17,6 @@ _RATE_LIMIT_SKIP = frozenset({"/", "/health", "/docs", "/redoc", "/openapi.json"
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Attaches X-Request-ID and X-Response-Time to every response."""
-
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         rid = uuid.uuid4().hex[:10]
         t0 = time.monotonic()
@@ -32,18 +30,12 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
         logger.info(
             '"%s %s" %d %.1fms rid=%s',
-            request.method,
-            request.url.path,
-            response.status_code,
-            elapsed_ms,
-            rid,
+            request.method, request.url.path, response.status_code, elapsed_ms, rid,
         )
         return response
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Sliding-window rate limiter keyed on client IP."""
-
     def __init__(self, app: ASGIApp, *, requests: int, window: int) -> None:
         super().__init__(app)
         self._limit = requests
@@ -77,7 +69,5 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         window.append(now)
         response = await call_next(request)
         response.headers["X-RateLimit-Limit"] = str(self._limit)
-        response.headers["X-RateLimit-Remaining"] = str(
-            max(0, self._limit - len(window))
-        )
+        response.headers["X-RateLimit-Remaining"] = str(max(0, self._limit - len(window)))
         return response
