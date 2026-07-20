@@ -191,13 +191,14 @@ async def similar_phones(conn: asyncpg.Connection, phone_id: int, limit: int) ->
 
 async def compare_by_ids(conn: asyncpg.Connection, ids: list[int]) -> list[dict]:
     rows = await conn.fetch(
-        f"SELECT {PHONE_LIST_SELECT} {PHONE_JOIN} WHERE p.id = ANY($1::int[])",
+        f"SELECT {PHONE_DETAIL_SELECT} {PHONE_JOIN} WHERE p.id = ANY($1::int[])",
         ids,
     )
     phones = rows_to_list(rows)
     for p in phones:
         price = await latest_price_point(conn, p["id"])
         apply_latest_price(p, price)
+        p["features"] = await fetch_features(conn, p["id"])
 
     attach_computed_fields(phones)
     for p in phones:
@@ -207,13 +208,14 @@ async def compare_by_ids(conn: asyncpg.Connection, ids: list[int]) -> list[dict]
 
 async def compare_by_slugs(conn: asyncpg.Connection, slugs: list[str]) -> list[dict]:
     rows = await conn.fetch(
-        f"SELECT {PHONE_LIST_SELECT} {PHONE_JOIN} WHERE p.slug = ANY($1::text[])",
+        f"SELECT {PHONE_DETAIL_SELECT} {PHONE_JOIN} WHERE p.slug = ANY($1::text[])",
         slugs,
     )
     phones = rows_to_list(rows)
     for p in phones:
         price = await latest_price_point(conn, p["id"])
         apply_latest_price(p, price)
+        p["features"] = await fetch_features(conn, p["id"])
 
     attach_computed_fields(phones)
     for p in phones:
