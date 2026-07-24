@@ -1,37 +1,36 @@
 from __future__ import annotations
-
 import re
 
-# ─── chipset tier (regex-based fallback when no AI tier exists) ──────────────
+# Single source of truth for chipset tier detection. Raw pattern strings
+# (lowercase, no verbose mode) so the same source compiles as a Python
+# regex here AND gets passed as-is into Postgres `~` in query.py — one
+# definition, two consumers, impossible to drift apart.
+TIER_REGEX_SOURCE: dict[str, str] = {
+    "flagship": (
+        r"snapdragon\s+8[+s]?\s*(elite|gen\s*[1-9])"
+        r"|\bsm8[1-9]\d{2}\b"
+        r"|dimensity\s+9\d{3}"
+        r"|\bmt699\d\b"
+        r"|exynos\s+2\d{3}"
+        r"|apple\s+a(1[4-9]|[2-9]\d)(\s+(bionic|pro|max))?"
+        r"|tensor\s+g[3-9]"
+        r"|kirin\s+9\d{3}"
+    ),
+    "upper_mid": (
+        r"snapdragon\s+7[+s]?\s*gen"
+        r"|snapdragon\s+6\s+gen"
+        r"|\bsm7[1-6]\d{2}\b"
+        r"|dimensity\s+[78]\d{2,3}"
+        r"|\bmt6[78]\d{2}\b"
+        r"|exynos\s+1\d{3}"
+        r"|kirin\s+8\d{2}"
+        r"|tensor\s+g[12]"
+        r"|apple\s+a1[0-3](\s+(bionic|pro))?"
+    ),
+}
 
-_FLAGSHIP = re.compile(
-    r"""
-    snapdragon \s+ 8 [+s]? \s* (?: elite | gen \s* \d+ )
-    | \b sm8[1-9]\d{2} \b
-    | dimensity \s+ 9\d{3}
-    | \b mt699\d \b
-    | exynos \s+ 2\d{3}
-    | apple \s+ a (?: 1[4-9] | [2-9]\d ) (?: \s+ (?: bionic | pro | max ) )?
-    | tensor \s+ g [3-9]
-    | kirin \s+ 9\d{3}
-    """,
-    re.VERBOSE | re.IGNORECASE,
-)
-
-_UPPER_MID = re.compile(
-    r"""
-    snapdragon \s+ 7 [+s]? \s* gen
-    | snapdragon \s+ 6 \s+ gen
-    | \b sm7[1-6]\d{2} \b
-    | dimensity \s+ [78]\d{2,3}
-    | \b mt6[78]\d{2} \b
-    | exynos \s+ 1\d{3}
-    | kirin \s+ 8\d{2}
-    | tensor \s+ g [12]
-    | apple \s+ a1[0-3] (?: \s+ (?: bionic | pro ) )?
-    """,
-    re.VERBOSE | re.IGNORECASE,
-)
+_FLAGSHIP = re.compile(TIER_REGEX_SOURCE["flagship"], re.IGNORECASE)
+_UPPER_MID = re.compile(TIER_REGEX_SOURCE["upper_mid"], re.IGNORECASE)
 
 _TIER_LABELS = {
     "ultra_flagship": "Ultra Flagship",
@@ -55,6 +54,15 @@ def chipset_tier_fallback(chipset: str | None) -> str:
         return "upper_mid"
     return "entry"
 
+
+def resolve_tier(smart_tier: str | None, chipset: str | None) -> dict | None:
+    raw = smart_tier or chipset_tier_fallback(chipset)
+    if not raw or raw == "unknown":
+        return None
+    return {"id": raw, "label": _TIER_LABELS.get(raw, raw.replace("_", " ").title())}
+
+
+
 def average_component_scores(p: dict) -> float | None:
     """Stable value_score fallback: average of the phone's own AI sub-scores.
     Unlike compute_value_score, this never depends on what else is on the
@@ -71,15 +79,6 @@ def average_component_scores(p: dict) -> float | None:
         return None
     return round(sum(vals) / len(vals), 1)
     
-def resolve_tier(smart_tier: str | None, chipset: str | None) -> dict | None:
-    """Prefers the AI-assigned tier (5-bucket vocabulary); falls back to
-    the regex-derived tier from chipset text. Returns a display-ready dict
-    or None if nothing is known."""
-    raw = smart_tier or chipset_tier_fallback(chipset)
-    if not raw or raw == "unknown":
-        return None
-    return {"id": raw, "label": _TIER_LABELS.get(raw, raw.replace("_", " ").title())}
-
 
 # ─── spec composite (used when no price/peers exist, or as a value_score
 #     denominator when smart_value_score is absent) ───────────────────────────
