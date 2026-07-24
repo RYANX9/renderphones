@@ -3,11 +3,39 @@ from __future__ import annotations
 from typing import Any
 
 from .scoring import (
+    average_component_scores,
     chipset_tier_fallback,
     compute_value_score,
     normalize_popularity,
     resolve_tier,
 )
+
+def attach_computed_fields(phones: list[dict], peers: list[dict] | None = None) -> list[dict]:
+    """Adds `chipset_tier` and `value_score` to each row.
+    value_score priority:
+      1. smart_value_score — direct AI-scored value, most reliable.
+      2. average of the phone's own AI sub-scores — still page-independent,
+         since every component is a fixed column on this phone's row.
+      3. compute_value_score against `peers` — only for phones with zero
+         AI scoring at all. This one IS page-scoped and approximate; the
+         frontend should mark it as such (CompareClient already does).
+    """
+    peer_set = peers if peers is not None else phones
+    for p in phones:
+        p["chipset_tier"] = resolve_tier(p.get("smart_tier"), p.get("chipset"))
+        p["popularity"] = normalize_popularity(p.get("popularity"))
+
+        smart_value = p.get("smart_value_score")
+        if smart_value is not None:
+            p["value_score"] = round(float(smart_value), 1)
+        else:
+            avg = average_component_scores(p)
+            if avg is not None:
+                p["value_score"] = avg
+            elif p.get("value_score") is None:
+                p["value_score"] = compute_value_score(p, peer_set)
+    return phones
+    
 
 _SMART_KEYS = (
     "smart_overall_score", "smart_camera_score", "smart_performance_score",
