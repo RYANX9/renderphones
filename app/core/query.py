@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
-
+from .scoring import TIER_REGEX_SOURCE
 from .sql_fragments import SORT_COL_MAP
 
 # Brand/line aliasing so "s24" finds "Galaxy S24", "iphone 16" finds
@@ -78,29 +78,6 @@ class FilterParams:
 
     exclude_ids: list[int] = field(default_factory=list)
 
-
-# Regex-based chipset tiering. Kept and tightened from the previous
-# implementation, now sourced against the real `s.chipset` TEXT column.
-_TIER_PATTERNS: dict[str, str] = {
-    "flagship": (
-        r"snapdragon 8 elite|snapdragon 8s elite"
-        r"|snapdragon 8[+s]? gen [1-9]"
-        r"|dimensity 9[0-9]{3}"
-        r"|exynos 2[0-9]{3}"
-        r"|apple a1[4-9]|apple a[2-9][0-9]"
-        r"|tensor g[3-9]"
-        r"|kirin 9[0-9]{3}"
-    ),
-    "upper_mid": (
-        r"snapdragon 7[+s]? gen"
-        r"|snapdragon 6 gen"
-        r"|dimensity [78][0-9]{2,3}"
-        r"|exynos 1[0-9]{3}"
-        r"|kirin 8[0-9]{2}"
-        r"|tensor g[12]"
-        r"|apple a1[0-3]"
-    ),
-}
 
 
 def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
@@ -190,17 +167,16 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
         params.append(f.camera_setup_type.lower())
         i += 1
 
-    if f.chipset_tier and f.chipset_tier in _TIER_PATTERNS:
+    if f.chipset_tier and f.chipset_tier in TIER_REGEX_SOURCE:
         conditions.append(f"LOWER(s.chipset) ~ ${i}")
-        params.append(_TIER_PATTERNS[f.chipset_tier])
+        params.append(TIER_REGEX_SOURCE[f.chipset_tier])
         i += 1
     elif f.chipset_tier == "entry":
-        # entry = not matching flagship or upper_mid, and has a chipset at all
         conditions.append(
             f"s.chipset IS NOT NULL AND LOWER(s.chipset) !~ ${i} AND LOWER(s.chipset) !~ ${i + 1}"
         )
-        params.append(_TIER_PATTERNS["flagship"])
-        params.append(_TIER_PATTERNS["upper_mid"])
+        params.append(TIER_REGEX_SOURCE["flagship"])
+        params.append(TIER_REGEX_SOURCE["upper_mid"])
         i += 2
 
     if f.exclude_ids:
