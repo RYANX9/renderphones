@@ -55,7 +55,22 @@ def chipset_tier_fallback(chipset: str | None) -> str:
         return "upper_mid"
     return "entry"
 
-
+def average_component_scores(p: dict) -> float | None:
+    """Stable value_score fallback: average of the phone's own AI sub-scores.
+    Unlike compute_value_score, this never depends on what else is on the
+    page — every input is a fixed column on this phone's smart_scores row."""
+    fields = (
+        "smart_camera_score",
+        "smart_performance_score",
+        "smart_battery_score",
+        "smart_display_score",
+        "smart_build_score",
+    )
+    vals = [float(p[f]) for f in fields if p.get(f) is not None]
+    if not vals:
+        return None
+    return round(sum(vals) / len(vals), 1)
+    
 def resolve_tier(smart_tier: str | None, chipset: str | None) -> dict | None:
     """Prefers the AI-assigned tier (5-bucket vocabulary); falls back to
     the regex-derived tier from chipset text. Returns a display-ready dict
