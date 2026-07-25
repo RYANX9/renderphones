@@ -63,19 +63,27 @@ def resolve_tier(smart_tier: str | None, chipset: str | None) -> dict | None:
 
 
 
-def average_component_scores(p: dict) -> float | None:
-    """Stable value_score fallback: average of the phone's own AI sub-scores.
-    Unlike compute_value_score, this never depends on what else is on the
-    page — every input is a fixed column on this phone's smart_scores row."""
+def average_component_scores(p: dict, *, min_components: int = 1) -> float | None:
+    """The one number: average of every AI sub-score this phone actually
+    has, value_score included as a sixth dimension rather than a separate
+    override. Every input is a fixed column on this phone's own
+    phone_smart_scores row, so the result is identical on every page that
+    renders this phone — homepage grid, brand page, detail page, compare.
+
+    min_components guards against a phone with only one sub-score filled
+    in producing a number that reads as "the average" but is really just
+    that one field wearing a different label.
+    """
     fields = (
         "smart_camera_score",
         "smart_performance_score",
         "smart_battery_score",
         "smart_display_score",
         "smart_build_score",
+        "smart_value_score",
     )
     vals = [float(p[f]) for f in fields if p.get(f) is not None]
-    if not vals:
+    if len(vals) < min_components:
         return None
     return round(sum(vals) / len(vals), 1)
     
