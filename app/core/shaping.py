@@ -10,33 +10,6 @@ from .scoring import (
     resolve_tier,
 )
 
-def attach_computed_fields(phones: list[dict], peers: list[dict] | None = None) -> list[dict]:
-    """Adds `chipset_tier` and `value_score` to each row.
-
-    value_score is the single number shown everywhere for this phone —
-    hero badge, cards, compare table. Priority:
-      1. average_component_scores — average of every stored AI sub-score
-         (camera/performance/battery/display/build/value), including the
-         AI's own value_score as one input rather than letting it silently
-         override the rest. This is what makes the number identical
-         across every page: it's a pure function of this phone's row.
-      2. compute_value_score against `peers` — only for phones with zero
-         AI scoring at all. Page-scoped and approximate; frontend should
-         mark it as an estimate.
-    """
-    peer_set = peers if peers is not None else phones
-    for p in phones:
-        p["chipset_tier"] = resolve_tier(p.get("smart_tier"), p.get("chipset"))
-        p["popularity"] = normalize_popularity(p.get("popularity"))
-
-        avg = average_component_scores(p)
-        if avg is not None:
-            p["value_score"] = avg
-        elif p.get("value_score") is None:
-            p["value_score"] = compute_value_score(p, peer_set)
-    return phones
-    
-
 _SMART_KEYS = (
     "smart_overall_score", "smart_camera_score", "smart_performance_score",
     "smart_battery_score", "smart_display_score", "smart_build_score",
@@ -73,20 +46,27 @@ def pop_smart_score(d: dict) -> dict | None:
 
 
 def attach_computed_fields(phones: list[dict], peers: list[dict] | None = None) -> list[dict]:
-    """Adds `chipset_tier` (dict: id+label) and `value_score` to each row.
-    `value_score` prefers the AI smart_value_score, then a specs-per-dollar
-    composite scored against `peers` (defaults to `phones` itself, which is
-    correct for list endpoints where the page is a real comparison set, and
-    wrong for a single-phone lookup — those callers must pass explicit peers).
+    """Adds `chipset_tier` and `value_score` to each row.
+
+    value_score is the single number shown everywhere for this phone —
+    hero badge, cards, compare table. Priority:
+      1. average_component_scores — average of every stored AI sub-score
+         (camera/performance/battery/display/build/value), including the
+         AI's own value_score as one input rather than letting it silently
+         override the rest. This is what makes the number identical
+         across every page: it's a pure function of this phone's row.
+      2. compute_value_score against `peers` — only for phones with zero
+         AI scoring at all. Page-scoped and approximate; frontend should
+         mark it as an estimate.
     """
     peer_set = peers if peers is not None else phones
     for p in phones:
         p["chipset_tier"] = resolve_tier(p.get("smart_tier"), p.get("chipset"))
         p["popularity"] = normalize_popularity(p.get("popularity"))
 
-        smart_value = p.get("smart_value_score")
-        if smart_value is not None:
-            p["value_score"] = round(float(smart_value), 1)
+        avg = average_component_scores(p)
+        if avg is not None:
+            p["value_score"] = avg
         elif p.get("value_score") is None:
             p["value_score"] = compute_value_score(p, peer_set)
     return phones
