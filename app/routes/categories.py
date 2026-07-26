@@ -87,16 +87,11 @@ def _category_sql(smart_expr: str, legacy_score_expr: str, where_clause: str) ->
                        10.0 * legacy_raw_score / NULLIF(MAX(legacy_raw_score) OVER (), 0)
                    ) AS blended_score
             FROM candidates
-        ),
-        top_n AS (
-            SELECT * FROM normalized
-            ORDER BY blended_score DESC NULLS LAST
-            LIMIT {{limit}}
         )
-        SELECT *,
-               10.0 * blended_score / NULLIF(MAX(blended_score) OVER (), 0) AS category_score
-        FROM top_n
+        SELECT *, blended_score AS category_score
+        FROM normalized
         ORDER BY blended_score DESC NULLS LAST
+        LIMIT {{limit}}
     """
 
 
