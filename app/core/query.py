@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
-from .scoring import TIER_REGEX_SOURCE
+from .scoring import TIER_REGEX_SOURCE, FEATURE_TAG_PATTERNS
 from .sql_fragments import SORT_COL_MAP
 
 # Brand/line aliasing so "s24" finds "Galaxy S24", "iphone 16" finds
@@ -75,7 +75,8 @@ class FilterParams:
 
     camera_setup_type: str | None = None  # single/dual/triple/quad
     water_resistant: bool | None = None   # any IP rating present
-
+    
+    features: list[str] | None = None
     exclude_ids: list[int] = field(default_factory=list)
 
 
@@ -178,6 +179,18 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
         params.append(TIER_REGEX_SOURCE["flagship"])
         params.append(TIER_REGEX_SOURCE["upper_mid"])
         i += 2
+
+    if f.features:
+        for tag in f.features:
+            pattern = FEATURE_TAG_PATTERNS.get(tag)
+            if not pattern:
+                continue
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM phone_features pf "
+                f"WHERE pf.phone_id = p.id AND pf.feature_name ILIKE ${i})"
+            )
+            params.append(pattern)
+            i += 1
 
     if f.exclude_ids:
         conditions.append(f"p.id != ALL(${i})")
