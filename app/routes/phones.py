@@ -50,6 +50,7 @@ async def search_phones(
     is_premium_gaming: Optional[bool] = Query(None),
     camera_setup_type: Optional[str] = Query(None),
     water_resistant: Optional[bool] = Query(None),
+    features: Optional[str] = Query(None, description="Comma-separated feature tag ids"),
     sort_by: str = Query("relevance"),
     sort_order: str = Query("desc"),
     page: int = Query(1, ge=1),
@@ -69,6 +70,7 @@ async def search_phones(
         has_nfc=has_nfc, has_ois=has_ois, has_wireless_charging=has_wireless_charging,
         has_headphone_jack=has_headphone_jack, is_foldable=is_foldable,
         is_premium_gaming=is_premium_gaming, camera_setup_type=camera_setup_type,
+        features=[t.strip() for t in features.split(",") if t.strip()] if features else None,
         water_resistant=water_resistant,
     )
 
