@@ -114,6 +114,7 @@ async def get_brand_phones(
     max_weight: Optional[int] = Query(None),
     min_charging_w: Optional[int] = Query(None),
     chipset_tier: Optional[str] = Query(None),
+    features: Optional[str] = Query(None),
 ):
     brand_words = brand_name.replace("-", " ")
 
@@ -123,6 +124,8 @@ async def get_brand_phones(
         min_screen_size=min_screen_size, max_screen_size=max_screen_size,
         min_year=min_year, max_weight=max_weight, min_charging_w=min_charging_w,
         chipset_tier=chipset_tier,
+        features=[t.strip() for t in features.split(",") if t.strip()] if features else None,
+
     )
     where, params = build_filter_where(filters)
     sort_expr, order = resolve_sort(sort_by, sort_order, has_query=False)
