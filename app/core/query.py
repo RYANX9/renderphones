@@ -190,7 +190,7 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
                 f"WHERE pf.phone_id = p.id AND pf.feature_name ILIKE ${i})"
             )
             params.append(pattern)
-            i += 1
+            i += 1 
 
     if f.exclude_ids:
         conditions.append(f"p.id != ALL(${i})")
