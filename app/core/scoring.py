@@ -32,6 +32,23 @@ TIER_REGEX_SOURCE: dict[str, str] = {
 _FLAGSHIP = re.compile(TIER_REGEX_SOURCE["flagship"], re.IGNORECASE)
 _UPPER_MID = re.compile(TIER_REGEX_SOURCE["upper_mid"], re.IGNORECASE)
 
+# Curated ILIKE buckets matched against phone_features.feature_name (free
+# text scraped from GSMArena's sensors/features line). Exact-match on raw
+# distinct values fragments across near-duplicates like "Fingerprint (under
+# display, ultrasonic)" vs "Fingerprint (under display)" — each key here is
+# a substring bucket, not a literal value.
+FEATURE_TAG_PATTERNS: dict[str, str] = {
+    "fingerprint_display": "%fingerprint%display%",
+    "fingerprint_side": "%fingerprint%side%",
+    "fingerprint_rear": "%fingerprint%rear%",
+    "stylus": "%stylus%",
+    "esim": "%esim%",
+    "gyroscope": "%gyro%",
+    "compass": "%compass%",
+    "barometer": "%barometer%",
+    "heart_rate": "%heart rate%",
+}
+
 _TIER_LABELS = {
     "ultra_flagship": "Ultra Flagship",
     "flagship": "Flagship",
