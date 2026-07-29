@@ -3,18 +3,31 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import asyncpg
+import time
+
+from ..core.sql_fragments import PHONE_JOIN, PHONE_LIST_SELECT, PHONE_DETAIL_SELECT, RELEASE_TS_EXPR
 
 from ..core.database import rows_to_list, row_to_dict
 from ..core.query import FilterParams, build_filter_where, resolve_sort
 from ..core.scoring import similarity_score
 from ..core.shaping import attach_computed_fields, pop_smart_score
-from ..core.sql_fragments import PHONE_JOIN, PHONE_LIST_SELECT, PHONE_DETAIL_SELECT
 
 # Peer-group size used to normalise value_score for a single-phone lookup.
 VALUE_PEER_LIMIT = 40
 # Candidate pool pulled before similarity re-ranking in /similar.
 SIMILAR_CANDIDATE_POOL = 60
+# Trending candidate pool pulled before quality+recency re-ranking, same
+# pattern as SIMILAR_CANDIDATE_POOL — cheap SQL ordering gets a wide
+# enough pool, the real ranking happens in Python once value_score is
+# resolved for phones with no AI scoring at all.
+TRENDING_CANDIDATE_MULTIPLIER = 6
+TRENDING_MIN_POOL = 60
 
+# Weight given to "well-scored" vs "recently released" in the trending
+# blend. Tune here, not scattered through the sort key.
+TRENDING_QUALITY_WEIGHT = 0.6
+TRENDING_RECENCY_WEIGHT = 0.4
+TRENDING_RECENCY_DECAY_DAYS = 365.0  # linear decay to 0 over one year
 
 async def search(
     conn: asyncpg.Connection,
@@ -243,20 +256,37 @@ async def latest(conn: asyncpg.Connection, limit: int) -> list[dict]:
 
 
 async def trending(conn: asyncpg.Connection, limit: int) -> list[dict]:
+    """Was ordered by p.popularity/p.fans — placeholder columns with no
+    real signal behind them until view/account tracking exists. Until
+    then, "trending" means what it should honestly mean: well-scored and
+    recently released, not a fabricated popularity count."""
+    pool_size = max(limit * TRENDING_CANDIDATE_MULTIPLIER, TRENDING_MIN_POOL)
+
     rows = await conn.fetch(
         f"""
         SELECT {PHONE_LIST_SELECT}
         {PHONE_JOIN}
-        ORDER BY p.popularity DESC NULLS LAST,
-                 p.fans DESC NULLS LAST,
-                 COALESCE(sc.overall_score, 0) DESC,
-                 p.release_year DESC NULLS LAST,
-                 p.id DESC
-        LIMIT {int(limit)}
+        ORDER BY
+            {RELEASE_TS_EXPR} DESC NULLS LAST,
+            COALESCE(sc.overall_score, s.antutu_score / 100000.0, 0) DESC,
+            p.id DESC
+        LIMIT {int(pool_size)}
         """
     )
+
     phones = rows_to_list(rows)
     attach_computed_fields(phones)
     for p in phones:
         p["smart_score"] = pop_smart_score(p)
-    return phones
+
+    now_ts = time.time()
+
+    def trending_rank(p: dict) -> float:
+        quality = p.get("value_score") or 0.0
+        release_ts = p.get("release_ts")
+        age_days = max((now_ts - release_ts) / 86_400, 0.0) if release_ts else TRENDING_RECENCY_DECAY_DAYS
+        recency = max(0.0, 10.0 - (age_days / TRENDING_RECENCY_DECAY_DAYS) * 10.0)
+        return quality * TRENDING_QUALITY_WEIGHT + recency * TRENDING_RECENCY_WEIGHT
+
+    phones.sort(key=trending_rank, reverse=True)
+    return phones[:limit]
