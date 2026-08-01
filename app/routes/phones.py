@@ -187,9 +187,6 @@ async def get_phone(phone_id: str):
         phone["images"] = await phone_repo.fetch_images(conn, phone["id"])
         phone["features"] = await phone_repo.fetch_features(conn, phone["id"])
 
-        full_specs = await phone_repo.fetch_full_specifications(conn, phone["id"])
-        phone["full_specifications"] = full_specs["full_specifications"] if full_specs else None
-
         price = await phone_repo.latest_price_point(conn, phone["id"])
         phone_repo.apply_latest_price(phone, price)
 
