@@ -89,7 +89,13 @@ async def fetch_variants(conn: asyncpg.Connection, phone_id: int) -> list[dict]:
     )
     return rows_to_list(rows)
 
-
+async def fetch_full_specifications(conn: asyncpg.Connection, phone_id: int) -> dict | None:
+    row = await conn.fetchrow(
+        "SELECT full_specifications FROM phone_full_specifications WHERE phone_id = $1",
+        phone_id,
+    )
+    return row_to_dict(row)
+    
 async def fetch_images(conn: asyncpg.Connection, phone_id: int) -> list[dict]:
     rows = await conn.fetch(
         """
