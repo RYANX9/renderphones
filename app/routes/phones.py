@@ -201,6 +201,17 @@ async def get_phone(phone_id: str):
     return phone
 
 
+@router.get("/{phone_id}/full-specs")
+async def get_full_specs(phone_id: int):
+    row = await conn.fetchrow(
+        "SELECT full_specifications FROM phone_full_specifications WHERE phone_id = $1",
+        phone_id,
+    )
+    if row is None:
+        raise HTTPException(404, "No full specifications for this phone.")
+    return {"phone_id": phone_id, "full_specifications": row["full_specifications"]}
+    
+
 @router.get("/{phone_id}/variants")
 async def get_phone_variants(phone_id: int):
     async with get_pool().acquire() as conn:
