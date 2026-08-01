@@ -21,6 +21,15 @@ RELEASE_TS_EXPR = (
     "))::bigint"
 )
 
+# Card grids, search results, similar-phones rail, compare-bar thumbnails.
+# Every field here is >98% filled per fill_rate_report.json.
+PHONE_CARD_SELECT = """
+p.id, p.model_name, p.brand, p.slug, p.main_image_url,
+p.price_usd, p.release_year, p.availability_status, p.popularity,
+s.main_camera_mp, s.battery_capacity, s.screen_size,
+sc.overall_score AS smart_overall_score, sc.tier AS smart_tier
+"""
+
 # Full row for detail/compare. full_specifications is included here only;
 # list/search endpoints use PHONE_LIST_SELECT (below) which omits it since
 # it can be tens of KB per row and is never rendered in a grid/list view.
