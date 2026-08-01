@@ -187,6 +187,9 @@ async def get_phone(phone_id: str):
         phone["images"] = await phone_repo.fetch_images(conn, phone["id"])
         phone["features"] = await phone_repo.fetch_features(conn, phone["id"])
 
+        full_specs = await phone_repo.fetch_full_specifications(conn, phone["id"])
+        phone["full_specifications"] = full_specs["full_specifications"] if full_specs else None
+
         price = await phone_repo.latest_price_point(conn, phone["id"])
         phone_repo.apply_latest_price(phone, price)
 
@@ -203,14 +206,13 @@ async def get_phone(phone_id: str):
 
 @router.get("/{phone_id}/full-specs")
 async def get_full_specs(phone_id: int):
-    row = await conn.fetchrow(
-        "SELECT full_specifications FROM phone_full_specifications WHERE phone_id = $1",
-        phone_id,
-    )
-    if row is None:
-        raise HTTPException(404, "No full specifications for this phone.")
-    return {"phone_id": phone_id, "full_specifications": row["full_specifications"]}
+    async with get_pool().acquire() as conn:
+        specs = await phone_repo.fetch_full_specifications(conn, phone_id)
+    if specs is None:
+        raise HTTPException(status_code=404, detail="No full specifications for this phone.")
+    return {"phone_id": phone_id, "full_specifications": specs["full_specifications"]}
     
+
 
 @router.get("/{phone_id}/variants")
 async def get_phone_variants(phone_id: int):
