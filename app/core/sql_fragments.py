@@ -49,7 +49,7 @@ s.camera_summary, s.chipset, s.antutu_score, s.geekbench_single,
 s.geekbench_multi, s.gpu_score, s.is_premium_gaming,
 s.ram_options, s.storage_options, s.water_resistance, s.build_material,
 s.design_form, s.is_foldable, s.sim_layout, s.network_generation,
-s.has_nfc, s.has_headphone_jack, s.full_specifications,
+s.has_nfc, s.has_headphone_jack,
 
 sc.overall_score AS smart_overall_score,
 sc.camera_score AS smart_camera_score,
