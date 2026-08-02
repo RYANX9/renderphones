@@ -39,7 +39,24 @@ def expand_query_alias(q: str) -> str:
             return full + lower[len(short):]
     return q
 
-
+def build_relevance_order(f: FilterParams, params: list[Any]) -> str | None:
+    """Appends 2 params to `params` (mutated in place) and returns a scalar
+    match-quality expression, higher = better. None when there's no q to
+    rank against — resolve_sort falls back to release_ts in that case."""
+    if not f.q or not f.q.strip():
+        return None
+    expanded = expand_query_alias(f.q.strip()).lower()
+    i = len(params) + 1
+    params.append(f"%{expanded}%")
+    params.append(expanded)
+    like_idx, sim_idx = i, i + 1
+    return (
+        f"(CASE WHEN LOWER(p.model_name) = ${sim_idx} THEN 3 "
+        f"WHEN LOWER(p.model_name) LIKE ${sim_idx} || '%' THEN 2 "
+        f"WHEN LOWER(p.model_name) LIKE ${like_idx} THEN 1 "
+        f"ELSE 0 END + similarity(LOWER(p.model_name), ${sim_idx}))"
+    )
+    
 @dataclass
 class FilterParams:
     q: str | None = None
@@ -200,11 +217,14 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
     return " AND ".join(conditions), params
 
 
-def resolve_sort(sort_by: str, sort_order: str, has_query: bool) -> tuple[str, str]:
-    """Returns (order-by expression, direction). Falls back to release
-    date for unknown sort keys instead of erroring."""
-    if sort_by == "relevance" and not has_query:
+def resolve_sort(
+    sort_by: str, sort_order: str, has_query: bool, relevance_expr: str | None = None,
+) -> tuple[str, str]:
+    if sort_by == "relevance":
+        if relevance_expr:
+            return relevance_expr, "DESC"
         sort_by = "release_ts"
     expr = SORT_COL_MAP.get(sort_by) or SORT_COL_MAP["release_ts"]
     order = "DESC" if sort_order.lower() == "desc" else "ASC"
     return expr, order
+    
