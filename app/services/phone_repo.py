@@ -39,8 +39,7 @@ async def search(
     page_size: int,
 ) -> tuple[int, list[dict]]:
     where, params = build_filter_where(filters)
-    relevance_expr = build_relevance_order(filters, params)
-    sort_expr, order = resolve_sort(sort_by, sort_order, has_query=bool(filters.q), relevance_expr=relevance_expr)
+    sort_expr, order = resolve_sort(sort_by, sort_order, has_query=bool(filters.q))
     offset = (page - 1) * page_size
 
     total = await conn.fetchval(f"SELECT COUNT(*) {PHONE_JOIN} WHERE {where}", *params)
