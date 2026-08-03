@@ -38,8 +38,8 @@ async def search(
     page: int,
     page_size: int,
 ) -> tuple[int, list[dict]]:
-    where, params = build_filter_where(filters)
-    sort_expr, order = resolve_sort(sort_by, sort_order, has_query=bool(filters.q))
+    where, params, relevance_expr = build_filter_where(filters)
+    sort_expr, order = resolve_sort(sort_by, sort_order, has_query=bool(filters.q), relevance_expr=relevance_expr)
     offset = (page - 1) * page_size
 
     total = await conn.fetchval(f"SELECT COUNT(*) {PHONE_JOIN} WHERE {where}", *params)
@@ -62,6 +62,7 @@ async def search(
         p["smart_score"] = pop_smart_score(p)
 
     return total, phones
+    
 
 
 async def get_by_id_or_slug(conn: asyncpg.Connection, phone_id_or_slug: str) -> dict | None:
