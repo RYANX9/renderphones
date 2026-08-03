@@ -99,6 +99,8 @@ class FilterParams:
 
 
 def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
+    """Returns (WHERE clause body, params, relevance_expr). Caller prefixes
+    WHERE clause with 'WHERE'. relevance_expr is None when there's no q."""
     conditions: list[str] = ["1=1"]
     params: list[Any] = []
     relevance_expr: str | None = None
@@ -106,19 +108,23 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
 
     if f.q and f.q.strip():
         expanded = expand_query_alias(f.q.strip()).lower()
-        conditions.append(
-            f"(LOWER(p.model_name) LIKE ${i}"
-            f" OR LOWER(p.brand) LIKE ${i}"
-            f" OR LOWER(s.chipset) LIKE ${i}"
-            f" OR similarity(LOWER(p.model_name), ${i + 1}) > 0.25)"
-        )
+
+        if len(expanded) >= 4:
+            conditions.append(
+                f"(LOWER(p.model_name) LIKE ${i}"
+                f" OR LOWER(p.brand) LIKE ${i}"
+                f" OR LOWER(s.chipset) LIKE ${i}"
+                f" OR similarity(LOWER(p.model_name), ${i + 1}) > 0.35)"
+            )
+        else:
+            conditions.append(
+                f"(LOWER(p.model_name) LIKE ${i}"
+                f" OR LOWER(p.brand) LIKE ${i}"
+                f" OR LOWER(s.chipset) LIKE ${i})"
+            )
         params.append(f"%{expanded}%")
         params.append(expanded)
 
-        # Relevance: exact model match highest, then prefix match, then
-        # substring, then trigram similarity as the tiebreaker/fallback.
-        # This is what "relevance" sort was supposed to be — SORT_COL_MAP
-        # previously mapped it to None and silently fell back to release_ts.
         relevance_expr = (
             f"(CASE WHEN LOWER(p.model_name) = ${i + 1} THEN 100 "
             f"WHEN LOWER(p.model_name) LIKE ${i + 1} || '%' THEN 80 "
@@ -217,7 +223,7 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
                 f"WHERE pf.phone_id = p.id AND pf.feature_name ILIKE ${i})"
             )
             params.append(pattern)
-            i += 1 
+            i += 1
 
     if f.exclude_ids:
         conditions.append(f"p.id != ALL(${i})")
@@ -227,11 +233,16 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
     return " AND ".join(conditions), params, relevance_expr
 
 
-def resolve_sort(sort_by: str, sort_order: str, has_query: bool, relevance_expr: str | None) -> tuple[str, str]:
+def resolve_sort(
+    sort_by: str, sort_order: str, has_query: bool, relevance_expr: str | None = None,
+) -> tuple[str, str]:
+    """Returns (order-by expression, direction)."""
+    order = "DESC" if sort_order.lower() == "desc" else "ASC"
+
     if sort_by == "relevance":
         if has_query and relevance_expr:
-            return relevance_expr, "DESC" if sort_order.lower() == "desc" else "ASC"
+            return relevance_expr, order
         sort_by = "release_ts"
+
     expr = SORT_COL_MAP.get(sort_by) or SORT_COL_MAP["release_ts"]
-    order = "DESC" if sort_order.lower() == "desc" else "ASC"
     return expr, order
