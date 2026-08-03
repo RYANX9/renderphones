@@ -98,10 +98,10 @@ class FilterParams:
 
 
 
-def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
-    """Returns (WHERE clause body, params). Caller prefixes with 'WHERE'."""
+def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
     conditions: list[str] = ["1=1"]
     params: list[Any] = []
+    relevance_expr: str | None = None
     i = 1
 
     if f.q and f.q.strip():
@@ -110,12 +110,22 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
             f"(LOWER(p.model_name) LIKE ${i}"
             f" OR LOWER(p.brand) LIKE ${i}"
             f" OR LOWER(s.chipset) LIKE ${i}"
-            # trigram similarity catches typos ("iphon 16" -> "iphone 16")
-            # without requiring an exact substring match
             f" OR similarity(LOWER(p.model_name), ${i + 1}) > 0.25)"
         )
         params.append(f"%{expanded}%")
         params.append(expanded)
+
+        # Relevance: exact model match highest, then prefix match, then
+        # substring, then trigram similarity as the tiebreaker/fallback.
+        # This is what "relevance" sort was supposed to be — SORT_COL_MAP
+        # previously mapped it to None and silently fell back to release_ts.
+        relevance_expr = (
+            f"(CASE WHEN LOWER(p.model_name) = ${i + 1} THEN 100 "
+            f"WHEN LOWER(p.model_name) LIKE ${i + 1} || '%' THEN 80 "
+            f"WHEN LOWER(p.model_name) LIKE '%' || ${i + 1} || '%' THEN 60 "
+            f"ELSE 0 END "
+            f"+ similarity(LOWER(p.model_name), ${i + 1}) * 20)"
+        )
         i += 2
 
     if f.brand:
@@ -214,17 +224,14 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any]]:
         params.append(f.exclude_ids)
         i += 1
 
-    return " AND ".join(conditions), params
+    return " AND ".join(conditions), params, relevance_expr
 
 
-def resolve_sort(
-    sort_by: str, sort_order: str, has_query: bool, relevance_expr: str | None = None,
-) -> tuple[str, str]:
+def resolve_sort(sort_by: str, sort_order: str, has_query: bool, relevance_expr: str | None) -> tuple[str, str]:
     if sort_by == "relevance":
-        if relevance_expr:
-            return relevance_expr, "DESC"
+        if has_query and relevance_expr:
+            return relevance_expr, "DESC" if sort_order.lower() == "desc" else "ASC"
         sort_by = "release_ts"
     expr = SORT_COL_MAP.get(sort_by) or SORT_COL_MAP["release_ts"]
     order = "DESC" if sort_order.lower() == "desc" else "ASC"
     return expr, order
-    
