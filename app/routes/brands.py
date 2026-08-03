@@ -123,12 +123,13 @@ async def get_brand_phones(
         min_ram=min_ram, min_battery=min_battery, min_camera_mp=min_camera_mp,
         min_screen_size=min_screen_size, max_screen_size=max_screen_size,
         min_year=min_year, max_weight=max_weight, min_charging_w=min_charging_w,
+        
         chipset_tier=chipset_tier,
         features=[t.strip() for t in features.split(",") if t.strip()] if features else None,
 
     )
-    where, params = build_filter_where(filters)
-    sort_expr, order = resolve_sort(sort_by, sort_order, has_query=False)
+    where, params, relevance_expr = build_filter_where(filters)
+    sort_expr, order = resolve_sort(sort_by, sort_order, has_query=False, relevance_expr=relevance_expr)
     offset = (page - 1) * page_size
 
     async with get_pool().acquire() as conn:
