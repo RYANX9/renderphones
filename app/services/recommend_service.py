@@ -74,7 +74,7 @@ async def recommend(
     for step_idx, factor in enumerate(WIDEN_STEPS):
         trial_min, trial_max = _widen_bounds(requested_min, requested_max, factor)
 
-        where, params = build_filter_where(FilterParams(min_price=trial_min, max_price=trial_max))
+        where, params, _ = build_filter_where(FilterParams(min_price=trial_min, max_price=trial_max))
         if hard_clause:
             where = f"{where} AND {hard_clause}"
         i = len(params) + 1
