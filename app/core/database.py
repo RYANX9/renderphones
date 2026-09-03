@@ -30,15 +30,12 @@ async def create_pool(dsn: str, *, min_size: int, max_size: int, command_timeout
         max_size=max_size,
         command_timeout=command_timeout,
         init=_init_conn,
-        # Recycle connections before a remote provider's own idle timeout
-        # has a chance to kill them out from under the pool — this is
-        # what usually causes "connection was closed in the middle of
-        # operation" when acquiring a fresh one.
         max_inactive_connection_lifetime=180.0,
+        timeout=15.0,
+        statement_cache_size=0,
     )
     logger.info("DB pool ready min=%d max=%d", min_size, max_size)
     return _pool
-
 
 async def close_pool() -> None:
     global _pool
