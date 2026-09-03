@@ -661,7 +661,6 @@ async def list_retailer_links(phone_id: int):
     links = [{**l, "scope": retailer_scope(l["retailer"])} for l in rows_to_list(rows)]
     return {"phone_id": phone_id, "links": links}
 
-
 @router.post("/phones/{phone_id}/links", status_code=201, dependencies=[Depends(require_admin_key)])
 async def create_retailer_link(phone_id: int, payload: RetailerLinkCreate):
     retailer = _validate_retailer(payload.retailer)
@@ -670,6 +669,8 @@ async def create_retailer_link(phone_id: int, payload: RetailerLinkCreate):
     url = payload.url.strip()
     if not url:
         raise HTTPException(status_code=422, detail="url is required.")
+
+    checked_at = datetime.utcnow() if status != "unchecked" else None
 
     async with get_pool().acquire() as conn:
         phone_exists = await conn.fetchval("SELECT id FROM phones WHERE id = $1", phone_id)
@@ -693,13 +694,12 @@ async def create_retailer_link(phone_id: int, payload: RetailerLinkCreate):
                 INSERT INTO retailer_links
                     (phone_id, variant_id, retailer, region, url, price,
                      currency, is_available, status, notes, checked_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        CASE WHEN $9 != 'unchecked' THEN CURRENT_TIMESTAMP ELSE NULL END)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING *
                 """,
                 phone_id, payload.variant_id, retailer, region, url,
                 payload.price, payload.currency, payload.is_available,
-                status, payload.notes,
+                status, payload.notes, checked_at,
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(
