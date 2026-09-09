@@ -13,11 +13,18 @@ JOIN phone_specs s ON s.phone_id = p.id
 LEFT JOIN phone_smart_scores sc ON sc.phone_id = p.id
 """
 
+# LEAST/GREATEST clamp guards against corrupt scraped values
+# (release_month=0/13, release_day=31 in a 30-day month, Feb 29/30 on a
+# non-leap year, etc). MAKE_DATE() raises a hard Postgres error on an
+# invalid combination instead of returning NULL — one bad row was enough
+# to 500 every unfiltered listing query. Day is capped at 28, which is
+# valid in every month of every year, so no combination can ever be
+# out of range.
 RELEASE_TS_EXPR = (
     "EXTRACT(EPOCH FROM MAKE_DATE("
     "COALESCE(p.release_year, 1970),"
-    "COALESCE(p.release_month, 1),"
-    "COALESCE(p.release_day, 1)"
+    "LEAST(GREATEST(COALESCE(p.release_month, 1), 1), 12),"
+    "LEAST(GREATEST(COALESCE(p.release_day, 1), 1), 28)"
     "))::bigint"
 )
 
