@@ -83,10 +83,13 @@ async def get_by_id_or_slug(conn: asyncpg.Connection, phone_id_or_slug: str) -> 
 async def fetch_variants(conn: asyncpg.Connection, phone_id: int) -> list[dict]:
     rows = await conn.fetch(
         """
-        SELECT id, ram_gb, storage_gb, price, url
+        SELECT DISTINCT ON (ram_gb, storage_gb)
+            id, ram_gb, storage_gb, price, url
         FROM phone_variants
         WHERE phone_id = $1
-        ORDER BY storage_gb ASC NULLS LAST, ram_gb ASC NULLS LAST
+        ORDER BY ram_gb ASC NULLS LAST, storage_gb ASC NULLS LAST,
+                 (url ~ 'google\\.com/search') ASC,
+                 id ASC
         """,
         phone_id,
     )
