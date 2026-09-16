@@ -35,13 +35,24 @@ RELEASE_TS_EXPR = (
 # latest_price_point()'s own ordering), phones.price_usd. price_original
 # is never part of this and is never touched.
 PRICE_RESOLVED_EXPR = """
-LEAST(
-    (SELECT MIN(pv.price) FROM phone_variants pv
-     WHERE pv.phone_id = p.id AND pv.price IS NOT NULL),
-    (SELECT pp.price_usd FROM price_points pp
-     WHERE pp.phone_id = p.id AND pp.price_usd IS NOT NULL
-     ORDER BY (pp.scope = 'global') DESC, pp.snapshot_date DESC
-     LIMIT 1),
+COALESCE(
+    (
+        SELECT MIN(pv.price)
+        FROM phone_variants pv
+        WHERE pv.phone_id = p.id
+          AND pv.price IS NOT NULL
+          AND pv.url IS NOT NULL
+          AND pv.url !~ 'google\\.com/search'
+    ),
+    (
+        SELECT pp.price_usd
+        FROM price_points pp
+        WHERE pp.phone_id = p.id
+          AND pp.price_usd IS NOT NULL
+        ORDER BY (pp.scope = 'global') DESC,
+                 pp.snapshot_date DESC
+        LIMIT 1
+    ),
     p.price_usd
 )
 """
