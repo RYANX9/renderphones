@@ -52,7 +52,7 @@ async def search_phones(
     is_foldable: Optional[bool] = Query(None), is_premium_gaming: Optional[bool] = Query(None),
     camera_setup_type: Optional[str] = Query(None), water_resistant: Optional[bool] = Query(None),
     features: Optional[str] = Query(None, description="Comma-separated feature tag keys"),
-    region: Optional[str] = Query(None), include_upcoming: bool = Query(False),
+    region: Optional[str] = Query(None), include_upcoming: bool = Query(True),
     sort_by: str = Query("relevance"), sort_order: str = Query("desc"),
     page: int = Query(1, ge=1, le=500), page_size: int = Query(24, ge=1, le=100),
 ):
