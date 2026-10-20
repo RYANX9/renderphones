@@ -64,7 +64,7 @@ async def search_phones(
         tier=tier or chipset_tier, has_nfc=has_nfc, has_ois=has_ois, has_wireless_charging=has_wireless_charging,
         has_headphone_jack=has_headphone_jack, is_foldable=is_foldable, is_premium_gaming=is_premium_gaming,
         camera_setup_type=camera_setup_type, water_resistant=water_resistant, features=_csv(features),
-        region=_region(region), include_upcoming=include_upcoming,
+        region=_region(region), include_upcoming=include_upcoming, include_all=True,
     )
 
     async def fetch():
@@ -86,7 +86,7 @@ async def _empty_search(conn, q: Optional[str]) -> dict:
     closest: list[dict] = []
     if q and len(q.strip()) >= 2:
         rows = await conn.fetch(
-            "SELECT p.id FROM phone_catalog p WHERE p.status = 'available' AND NOT COALESCE(p.is_regional_edition, FALSE) "
+            "SELECT p.id FROM phone_catalog p WHERE TRUE "
             "ORDER BY similarity(lower(p.display_name), $1) DESC, p.overall_score DESC NULLS LAST LIMIT 6", q.strip().lower(),
         )
         minis = await phone_repo.minis_by_ids(conn, [r["id"] for r in rows])
