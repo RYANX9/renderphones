@@ -69,7 +69,7 @@ async def get_brand_phones(
         brand=slug, min_price=min_price, max_price=max_price, min_ram=min_ram, min_battery=min_battery,
         min_camera_mp=min_camera_mp, min_screen_size=min_screen_size, max_screen_size=max_screen_size,
         min_year=min_year, max_weight=max_weight, min_charging_w=min_charging_w, tier=tier or chipset_tier,
-        features=_csv(features), region=_region(region),
+        features=_csv(features), region=_region(region), include_all=True,
     )
 
     async def fetch():
