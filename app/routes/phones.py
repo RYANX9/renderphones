@@ -36,6 +36,10 @@ def _csv(value: Optional[str]) -> list[str] | None:
 
 # ── search ───────────────────────────────────────────────────────────────────
 
+# A text search returns one page: the best matches, nothing deeper. Anyone who
+# wants something else changes the search instead of paging through it.
+SEARCH_RESULT_CAP = 24
+
 @router.get("/search")
 async def search_phones(
     request: Request,
@@ -56,6 +60,10 @@ async def search_phones(
     sort_by: str = Query("relevance"), sort_order: str = Query("desc"),
     page: int = Query(1, ge=1, le=500), page_size: int = Query(24, ge=1, le=100),
 ):
+    text_search = bool(q and q.strip())
+    if text_search:
+        page, page_size = 1, min(page_size, SEARCH_RESULT_CAP)
+
     filters = FilterParams(
         q=q, brand=brand, brands=_csv(brands), chipset=chipset, min_price=min_price, max_price=max_price,
         min_ram=min_ram, min_storage=min_storage, min_battery=min_battery, min_camera_mp=min_camera_mp,
@@ -72,12 +80,16 @@ async def search_phones(
             total, phones = await phone_repo.search(conn, filters=filters, sort_by=sort_by, sort_order=sort_order,
                                                     page=page, page_size=page_size)
             out = {"total": total, "page": page, "page_size": page_size,
-                   "total_pages": max(1, -(-total // page_size)), "results": phones}
+                   "total_pages": 1 if text_search else max(1, -(-total // page_size)), "results": phones}
             if total == 0:
                 out["empty"] = await _empty_search(conn, q)
             return out
 
-    return await cached(f"search:{qkey(request)}", 300, fetch)
+    # ?page=N is ignored for text searches, so it must not create new cache entries.
+    key = qkey(request) if not text_search else "&".join(
+        f"{k}={v}" for k, v in sorted(request.query_params.multi_items()) if k not in ("page", "page_size")
+    )
+    return await cached(f"search:{key}:{page_size}", 300, fetch)
 
 
 async def _empty_search(conn, q: Optional[str]) -> dict:
