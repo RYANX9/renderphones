@@ -8,13 +8,14 @@ crowded pages.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import asyncpg
 
 from ..core.category_config import CATEGORY_CONFIG, price_band_slug
 from ..core.config import settings
-from ..core.database import row_to_dict
+from ..core.database import acquire_conn, row_to_dict
 from ..core.shaping import shape_mini
 from ..core.slugs import brand_path, category_path, compare_path, phone_path
 from ..core.sql_fragments import LISTABLE, MINI_SELECT, NOT_REGIONAL
@@ -69,34 +70,46 @@ async def _brand_neighbor(conn: asyncpg.Connection, brand_slug: str, release_ts:
 
 # ── phone ────────────────────────────────────────────────────────────────────
 
-async def for_phone(conn: asyncpg.Connection, phone: dict, region: str | None = None) -> list[dict]:
+async def _on(fn, *args):
+    """Run one query on its own pooled connection so independent queries overlap."""
+    async with acquire_conn() as conn:
+        return await fn(conn, *args)
+
+
+async def _categories(phone: dict) -> list[dict]:
+    return phone.get("categories") or await _on(phone_repo.phone_categories, phone["id"])
+
+
+async def for_phone(phone: dict, region: str | None = None) -> list[dict]:
     pid, full = phone["id"], phone["full_slug"]
     name = phone.get("display_name") or phone["name"]
 
-    popular = await stats_repo.pairs_for_phone(conn, pid, 2)
+    popular, riv, cats, newer = await asyncio.gather(
+        _on(stats_repo.pairs_for_phone, pid, 2),
+        _on(phone_repo.rivals, pid, 4, region),
+        _categories(phone),
+        _on(_brand_neighbor, phone["brand_slug"], phone.get("release_ts"), True),
+    )
+
     pop_steps = [
         step("phone.most_compared", "compare", f"Compare with {_other(p, pid)['display_name']}",
              compare_path([full, _other(p, pid)["full_slug"]]), _other(p, pid))
         for p in popular
     ]
-
-    riv = await phone_repo.rivals(conn, pid, 4, region)
     popular_ids = {_other(p, pid)["id"] for p in popular}
     rival_steps = [
         step("phone.rival", "compare", f"Compare with {r['display_name']}", compare_path([full, r["full_slug"]]), r)
         for r in riv if r["id"] not in popular_ids
     ]
 
-    cats = phone.get("categories") or await phone_repo.phone_categories(conn, pid)
     cat_step = []
     if cats:
         c = cats[0]
         cat_step = [step("phone.category", "category", f"#{c['rank']} in {c['title']}", c["path"])]
 
-    newer = await _brand_neighbor(conn, phone["brand_slug"], phone.get("release_ts"), True)
     newer_step = [step("phone.newer_model", "phone", f"Newer: {newer['display_name']}", newer["path"], newer)] if newer else []
     if not newer_step:
-        older = await _brand_neighbor(conn, phone["brand_slug"], phone.get("release_ts"), False)
+        older = await _on(_brand_neighbor, phone["brand_slug"], phone.get("release_ts"), False)
         newer_step = [step("phone.older_model", "phone", f"Previous model: {older['display_name']}", older["path"], older)] if older else []
 
     budget = _round_budget(phone.get("price_usd"))

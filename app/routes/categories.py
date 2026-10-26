@@ -15,6 +15,7 @@ from ..core.database import acquire_conn
 from ..core.insights import best_for_for_category, category_reason
 from ..core.market import cap_per_brand
 from ..core.seo import category_indexable
+from ..core.shaping import CATEGORY_EXTRA, SCORE_KEYS, strip_fields
 from ..core.slugs import category_path
 from ..jobs.refresh import refresh_category
 from ..services import next_steps, phone_repo
@@ -23,7 +24,8 @@ from .phones import _region
 router = APIRouter(prefix="/categories", tags=["categories"])
 
 CROWDED_THRESHOLD = 50
-CATEGORY_CACHE_VERSION = "camera-date-policy-v4-summary"
+CATEGORY_CACHE_VERSION = "camera-date-policy-v5-lean"
+FALLBACK_WEAKNESS = "No major weakness identified from the supplied specification data."
 
 
 SUMMARY_MIN_CHARS = 30
@@ -43,17 +45,18 @@ def _first_sentence(text: str | None) -> str | None:
     return sentence if len(sentence) >= SUMMARY_MIN_CHARS else None
 
 
-async def _attach_summaries(conn, phones: list[dict]) -> None:
-    """One query for the listed phones only. Category payload only; other endpoints are unchanged."""
+async def _attach_summaries(conn, phones: list[dict]) -> dict[int, list[str]]:
+    """One query for the listed phones: summary sentence on each, weaknesses returned by phone id."""
     if not phones:
-        return
+        return {}
     rows = await conn.fetch(
-        "SELECT phone_id, reasoning FROM phone_analysis WHERE phone_id = ANY($1::int[])",
+        "SELECT phone_id, reasoning, weaknesses FROM phone_analysis WHERE phone_id = ANY($1::int[])",
         [p["id"] for p in phones],
     )
     by_id = {r["phone_id"]: _first_sentence(r["reasoning"]) for r in rows}
     for p in phones:
         p["summary"] = by_id.get(p["id"])
+    return {r["phone_id"]: list(r["weaknesses"] or []) for r in rows}
 
 
 @router.get("")
@@ -101,8 +104,16 @@ async def get_category(
                 p["reason"] = category_reason(resolved, p)
                 if p.get("best_for"):
                     p["best_for"] = best_for_for_category(resolved, p["best_for"], p)
-            await _attach_summaries(conn, capped)
+            for p in capped:
+                strip_fields(p, SCORE_KEYS + CATEGORY_EXTRA)
+            weaknesses = await _attach_summaries(conn, capped)
+            buy = {str(pid): offer for pid, offer in (await phone_repo.best_buy_offers(conn, [p["id"] for p in capped])).items()}
             steps = await next_steps.for_category(conn, resolved, capped)
+        top_weakness = None
+        if capped:
+            top_weakness = next(
+                (w for w in weaknesses.get(capped[0]["id"], []) if w and w.strip() and w.strip() != FALLBACK_WEAKNESS), None,
+            )
         total_ranked = counts.get(resolved, 0)
         return {
             "slug": resolved,
@@ -114,6 +125,8 @@ async def get_category(
             "indexable": category_indexable(len(capped)),
             "crowded": total_ranked >= CROWDED_THRESHOLD,
             "phones": capped,
+            "buy": buy,
+            "top_weakness": top_weakness,
             "next_steps": steps,
         }
 

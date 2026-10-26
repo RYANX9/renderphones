@@ -5,16 +5,19 @@ from typing import Any
 
 import asyncpg
 
+from ..core.cache import cached
 from ..core.category_config import CATEGORY_CONFIG
+from ..core.config import settings
 from ..core.currency import to_local
-from ..core.database import row_to_dict, rows_to_list
+from ..core.database import acquire_conn, row_to_dict, rows_to_list
 from ..core.market import allowed_scopes, cap_per_brand, retailer_info
 from ..core.query import FilterParams, build_filter_where, resolve_sort
 from ..core.scoring import similarity_score
 from ..core.shaping import build_analysis, shape_card, shape_cards, shape_detail, shape_mini
 from ..core.slugs import brand_path, category_path, phone_path
 from ..core.sql_fragments import (
-    CARD_SELECT, DETAIL_SELECT, LISTABLE, MINI_SELECT, NOT_REGIONAL, UPCOMING, UPCOMING_STAGE, UPCOMING_STAGE_RANK
+    CARD_SELECT, CATEGORY_SELECT, COMPARE_SELECT, DETAIL_SELECT, LISTABLE, MINI_SELECT, NOT_REGIONAL,
+    UPCOMING, UPCOMING_STAGE, UPCOMING_STAGE_RANK,
 )
 
 SIMILAR_BRAND_CAP = 2
@@ -24,14 +27,26 @@ SIMILAR_CANDIDATE_POOL = 60
 # ── lists ────────────────────────────────────────────────────────────────────
 
 async def search(conn: asyncpg.Connection, *, filters: FilterParams, sort_by: str, sort_order: str,
-                 page: int, page_size: int) -> tuple[int, list[dict]]:
+                 page: int, page_size: int, count: bool = True) -> tuple[int, list[dict]]:
+    """count=False skips the window COUNT and fetches one extra row instead: the returned
+    total is then len(rows), so total > len(results) means "more exist"."""
     where, params, relevance_expr = build_filter_where(filters)
     sort_expr, order = resolve_sort(sort_by, sort_order, has_query=bool(filters.q), relevance_expr=relevance_expr)
     i = len(params) + 1
+    order_sql = f"ORDER BY {sort_expr} {order} NULLS LAST, p.id DESC"
+    offset = (page - 1) * page_size
+
+    if not count:
+        rows = rows_to_list(await conn.fetch(
+            f"SELECT {CARD_SELECT} FROM phone_catalog p WHERE {where} {order_sql} LIMIT ${i} OFFSET ${i + 1}",
+            *params, page_size + 1, offset,
+        ))
+        return len(rows), shape_cards(rows[:page_size])
+
     rows = await conn.fetch(
         f"SELECT {CARD_SELECT}, COUNT(*) OVER() AS _total FROM phone_catalog p WHERE {where} "
-        f"ORDER BY {sort_expr} {order} NULLS LAST, p.id DESC LIMIT ${i} OFFSET ${i + 1}",
-        *params, page_size, (page - 1) * page_size,
+        f"{order_sql} LIMIT ${i} OFFSET ${i + 1}",
+        *params, page_size, offset,
     )
     results = rows_to_list(rows)
     if results:
@@ -226,6 +241,35 @@ async def fetch_analysis(conn: asyncpg.Connection, phone_id: int) -> dict | None
     return build_analysis(row_to_dict(row))
 
 
+async def fetch_analyses(conn: asyncpg.Connection, phone_ids: list[int]) -> dict[int, dict | None]:
+    if not phone_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT phone_id, reasoning, strengths, weaknesses, model_version, scored_at "
+        "FROM phone_analysis WHERE phone_id = ANY($1::int[])", phone_ids,
+    )
+    return {r["phone_id"]: build_analysis(row_to_dict(r)) for r in rows}
+
+
+async def related_anchor(conn: asyncpg.Connection, phone_id: int) -> dict | None:
+    row = await conn.fetchrow(f"SELECT {MINI_SELECT}, p.release_ts FROM phone_catalog p WHERE p.id = $1", phone_id)
+    return shape_mini(row_to_dict(row)) if row else None
+
+
+async def best_buy_offers(conn: asyncpg.Connection, phone_ids: list[int]) -> dict[int, dict]:
+    """Cheapest real (linked, available, retailer-sourced) offer per phone."""
+    if not phone_ids:
+        return {}
+    rows = await conn.fetch(
+        """SELECT DISTINCT ON (v.phone_id) v.phone_id, o.url, COALESCE(r.name, o.retailer_key) AS retailer
+FROM offers o JOIN variants v ON v.id = o.variant_id LEFT JOIN retailers r ON r.key = o.retailer_key
+WHERE v.phone_id = ANY($1::int[]) AND o.is_available AND NOT o.is_placeholder AND o.price_source = 'retailer'
+  AND o.url IS NOT NULL AND o.url <> '' AND o.usd IS NOT NULL
+ORDER BY v.phone_id, o.usd ASC, o.id""", phone_ids,
+    )
+    return {r["phone_id"]: {"url": r["url"], "retailer": r["retailer"]} for r in rows}
+
+
 async def phone_categories(conn: asyncpg.Connection, phone_id: int) -> list[dict]:
     rows = await conn.fetch(
         "SELECT category_slug AS slug, rank, score FROM category_rankings WHERE phone_id = $1 "
@@ -239,35 +283,68 @@ async def phone_categories(conn: asyncpg.Connection, phone_id: int) -> list[dict
     return out
 
 
+_DETAIL_BUNDLE_SQL = f"""
+SELECT {DETAIL_SELECT},
+  (SELECT coalesce(json_agg(t ORDER BY t.ram_gb NULLS LAST, t.storage_gb NULLS LAST, t.id), '[]'::json) FROM (
+     SELECT v.id, v.ram_gb, v.storage_gb, v.is_default,
+            o.usd AS price_usd, o.url, o.retailer_key, o.region, o.is_placeholder,
+            (SELECT count(*)::int FROM offers x WHERE x.variant_id = v.id AND x.is_available) AS offer_count
+     FROM variants v
+     LEFT JOIN LATERAL (
+       SELECT f.usd, f.url, f.retailer_key, f.region, f.is_placeholder FROM offers f
+       WHERE f.variant_id = v.id AND f.is_available AND f.usd IS NOT NULL AND f.usd > 0
+       ORDER BY f.usd ASC, f.is_placeholder ASC, f.id LIMIT 1
+     ) o ON true
+     WHERE v.phone_id = p.id) t) AS variants_json,
+  (SELECT coalesce(json_agg(t ORDER BY t.usd ASC NULLS LAST, t.id), '[]'::json) FROM (
+     SELECT o.id, o.variant_id, v.ram_gb, v.storage_gb, o.retailer_key, r.name AS retailer_name, r.domain, r.scope,
+            COALESCE(o.region, r.region) AS region, o.usd, o.url, o.is_available, o.status, o.is_placeholder,
+            o.price_source, o.updated_at, o.checked_at
+     FROM offers o JOIN variants v ON v.id = o.variant_id LEFT JOIN retailers r ON r.key = o.retailer_key
+     WHERE v.phone_id = p.id) t) AS offers_json,
+  (SELECT coalesce(json_agg(t ORDER BY (t.kind = 'main') DESC, t.sort_order, t.id), '[]'::json) FROM (
+     SELECT id, url, kind, alt, width, height, sort_order FROM phone_images WHERE phone_id = p.id) t) AS images_json,
+  (SELECT coalesce(array_agg(f.feature_name ORDER BY f.feature_name), ARRAY[]::text[])
+     FROM phone_features f WHERE f.phone_id = p.id) AS features_arr,
+  (SELECT count(*)::int FROM price_history ph JOIN variants v ON v.id = ph.variant_id
+     WHERE v.phone_id = p.id) AS history_points,
+  (SELECT row_to_json(a) FROM (SELECT reasoning, strengths, weaknesses, model_version, scored_at
+     FROM phone_analysis WHERE phone_id = p.id) a) AS analysis_json,
+  (SELECT coalesce(json_agg(t ORDER BY t.rank, t.slug), '[]'::json) FROM (
+     SELECT category_slug AS slug, rank, score FROM category_rankings WHERE phone_id = p.id) t) AS categories_json
+FROM phone_catalog p WHERE """
+
+
 async def get_detail(conn: asyncpg.Connection, *, phone_id: int | None = None,
                      brand_slug: str | None = None, slug: str | None = None) -> dict | None:
+    """One round trip: variants, offers, images, features, analysis and category ranks are
+    aggregated into the detail row. Related phones and next steps live in /phones/{id}/related."""
     if phone_id is not None:
-        row = await conn.fetchrow(f"SELECT {DETAIL_SELECT} FROM phone_catalog p WHERE p.id = $1", phone_id)
+        row = await conn.fetchrow(_DETAIL_BUNDLE_SQL + "p.id = $1", phone_id)
     else:
         row = await conn.fetchrow(
-            f"SELECT {DETAIL_SELECT} FROM phone_catalog p WHERE p.brand_slug = $1 AND p.slug = $2",
-            (brand_slug or "").lower(), (slug or "").lower(),
+            _DETAIL_BUNDLE_SQL + "p.brand_slug = $1 AND p.slug = $2", (brand_slug or "").lower(), (slug or "").lower(),
         )
     if row is None:
         return None
     phone = shape_detail(row_to_dict(row))
-    pid = phone["id"]
 
-    phone["variants"] = await fetch_variants(conn, pid)
-    offers = await fetch_offers(conn, pid)
+    phone["variants"] = [_with_local(v, "price_usd") for v in phone.pop("variants_json")]
+    offers = phone.pop("offers_json")
+    for o in offers:
+        info = retailer_info(o["retailer_key"])
+        o["retailer_name"] = o.get("retailer_name") or info.get("name") or o["retailer_key"]
+        o["scope"] = o.get("scope") or info.get("scope") or "global"
+        _with_local(o, "usd")
     phone["_offer_rows"] = offers  # region-resolved by the route, never cached resolved
-    phone["images"] = rows_to_list(await conn.fetch(
-        "SELECT id, url, kind, alt, width, height, sort_order FROM phone_images WHERE phone_id = $1 "
-        "ORDER BY (kind = 'main') DESC, sort_order, id", pid,
-    ))
-    phone["features"] = [r["feature_name"] for r in await conn.fetch(
-        "SELECT feature_name FROM phone_features WHERE phone_id = $1 ORDER BY feature_name", pid,
-    )]
-    phone["price_history_points"] = await conn.fetchval(
-        "SELECT count(*)::int FROM price_history ph JOIN variants v ON v.id = ph.variant_id WHERE v.phone_id = $1", pid,
-    )
-    phone["analysis"] = await fetch_analysis(conn, pid)
-    phone["categories"] = await phone_categories(conn, pid)
+    phone["images"] = phone.pop("images_json")
+    phone["features"] = phone.pop("features_arr") or []
+    phone["price_history_points"] = phone.pop("history_points")
+    phone["analysis"] = build_analysis(phone.pop("analysis_json"))
+    phone["categories"] = [
+        {**r, "title": CATEGORY_CONFIG[r["slug"]]["title"], "path": category_path(r["slug"])}
+        for r in phone.pop("categories_json") if r["slug"] in CATEGORY_CONFIG
+    ]
     phone["brand_path"] = brand_path(phone["brand_slug"])
     return phone
 
@@ -328,33 +405,25 @@ async def compare(conn: asyncpg.Connection, *, ids: list[int] | None = None,
                   full_slugs: list[str] | None = None) -> list[dict]:
     if ids is not None:
         rows = await conn.fetch(
-            f"SELECT {DETAIL_SELECT} FROM phone_catalog p WHERE p.id = ANY($1::int[]) "
+            f"SELECT {COMPARE_SELECT} FROM phone_catalog p WHERE p.id = ANY($1::int[]) "
             "ORDER BY array_position($1::int[], p.id)", ids,
         )
     else:
         rows = await conn.fetch(
-            f"SELECT {DETAIL_SELECT} FROM phone_catalog p WHERE p.full_slug = ANY($1::text[]) "
+            f"SELECT {COMPARE_SELECT} FROM phone_catalog p WHERE p.full_slug = ANY($1::text[]) "
             "ORDER BY array_position($1::text[], p.full_slug)", full_slugs,
         )
-    phones = [shape_detail(r) for r in rows_to_list(rows)]
+    phones = shape_cards(rows_to_list(rows))
     if not phones:
         return phones
-    pids = [p["id"] for p in phones]
     feats: dict[int, list[str]] = defaultdict(list)
     for r in await conn.fetch(
-        "SELECT phone_id, feature_name FROM phone_features WHERE phone_id = ANY($1::int[]) ORDER BY feature_name", pids,
+        "SELECT phone_id, feature_name FROM phone_features WHERE phone_id = ANY($1::int[]) ORDER BY feature_name",
+        [p["id"] for p in phones],
     ):
         feats[r["phone_id"]].append(r["feature_name"])
-    analyses = {
-        r["phone_id"]: build_analysis(row_to_dict(r))
-        for r in await conn.fetch(
-            "SELECT phone_id, reasoning, strengths, weaknesses, model_version, scored_at "
-            "FROM phone_analysis WHERE phone_id = ANY($1::int[])", pids,
-        )
-    }
     for p in phones:
         p["features"] = feats.get(p["id"], [])
-        p["analysis"] = analyses.get(p["id"])
     return phones
 
 
@@ -394,7 +463,7 @@ async def category_rankings(conn: asyncpg.Connection, slug: str, pool: int, regi
         region_clause = "AND (cardinality(p.offer_scopes) = 0 OR p.offer_scopes && $4::text[])"
         params.append(scopes)
     rows = await conn.fetch(
-        f"""SELECT {CARD_SELECT}, r.score AS category_score, r.rank AS category_rank, r.breakdown AS breakdown
+        f"""SELECT {CATEGORY_SELECT}, r.score AS category_score, r.rank AS category_rank, r.breakdown AS breakdown
 FROM category_rankings r JOIN phone_catalog p ON p.id = r.phone_id
 WHERE r.category_slug = $1 AND ($3::text[] IS NULL OR p.status = ANY($3)) {region_clause}
 ORDER BY r.rank LIMIT $2""",
@@ -403,7 +472,32 @@ ORDER BY r.rank LIMIT $2""",
     out = []
     for row in rows_to_list(rows):
         row["category_score"] = round(float(row["category_score"]), 2)
-        out.append(shape_card(row))
+        out.append(shape_card(row, with_insight=True))
+    return out
+
+
+async def category_tops(conn: asyncpg.Connection, n: int, region: str | None) -> dict[str, list[dict]]:
+    """Top n phones of every category in one query (home tiles, best hub, compare landing)."""
+    params: list[Any] = [n]
+    clause = ""
+    scopes = allowed_scopes(region)
+    if scopes is not None:
+        clause = "WHERE (cardinality(p.offer_scopes) = 0 OR p.offer_scopes && $2::text[])"
+        params.append(scopes)
+    rows = await conn.fetch(
+        f"""SELECT * FROM (
+SELECT {CARD_SELECT}, r.category_slug, r.score AS category_score, r.rank AS category_rank,
+       row_number() OVER (PARTITION BY r.category_slug ORDER BY r.rank) AS rn
+FROM category_rankings r JOIN phone_catalog p ON p.id = r.phone_id {clause}
+) t WHERE rn <= $1 ORDER BY category_slug, rn""",
+        *params,
+    )
+    out: dict[str, list[dict]] = {}
+    for row in rows_to_list(rows):
+        slug = row.pop("category_slug")
+        row.pop("rn")
+        row["category_score"] = round(float(row["category_score"]), 2)
+        out.setdefault(slug, []).append(shape_card(row))
     return out
 
 
@@ -450,6 +544,28 @@ ORDER BY p.brand_slug, p.overall_score DESC, p.price_usd ASC NULLS LAST""",
         r["path"] = brand_path(r["brand_slug"])
         r["top_phone"] = top_by_brand.get(r["brand_slug"])
     return rows
+
+
+async def cached_brand_list() -> list[dict]:
+    async def fetch():
+        async with acquire_conn() as conn:
+            return await brand_list(conn)
+    return await cached("brandlist:v2", settings.cache_ttl_stable, fetch)
+
+
+async def brand_featured(conn: asyncpg.Connection, slugs: list[str], per_brand: int) -> dict[str, list[dict]]:
+    rows = await conn.fetch(
+        f"""SELECT * FROM (
+SELECT {MINI_SELECT}, row_number() OVER (PARTITION BY p.brand_slug ORDER BY p.release_ts DESC NULLS LAST, p.id DESC) AS rn
+FROM phone_catalog p WHERE p.brand_slug = ANY($1::text[]) AND {LISTABLE} AND {NOT_REGIONAL}
+) t WHERE rn <= $2 ORDER BY brand_slug, rn""",
+        slugs, per_brand,
+    )
+    out: dict[str, list[dict]] = {}
+    for row in rows_to_list(rows):
+        row.pop("rn")
+        out.setdefault(row["brand_slug"], []).append(shape_mini(row))
+    return out
 
 
 async def brand_detail(conn: asyncpg.Connection, brand_slug: str) -> dict | None:

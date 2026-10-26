@@ -16,12 +16,31 @@ from .phones import _csv, _region, qkey
 router = APIRouter(prefix="/brands", tags=["brands"])
 
 
+BRAND_PAGE_SIZE = 12
+
+
 @router.get("")
-async def list_brands():
+async def list_brands(
+    compact: bool = Query(False, description="name, slug, path and count only (navbar)"),
+    featured: int = Query(0, ge=0, le=24, description="attach the latest phones to the first N brands"),
+    per_brand: int = Query(4, ge=1, le=8),
+):
+    brands = await phone_repo.cached_brand_list()
+    if compact:
+        return {"brands": [
+            {"brand": b["brand"], "brand_slug": b["brand_slug"], "path": b["path"], "phone_count": b["phone_count"]}
+            for b in brands
+        ]}
+    if not featured:
+        return {"brands": brands}
+
     async def fetch():
+        slugs = list(dict.fromkeys(b["brand_slug"] for b in brands))[:featured]
         async with acquire_conn() as conn:
-            return {"brands": await phone_repo.brand_list(conn)}
-    return await cached("brands:all", settings.cache_ttl_stable, fetch)
+            phones = await phone_repo.brand_featured(conn, slugs, per_brand)
+        return {"brands": [{**b, "phones": phones.get(b["brand_slug"], [])} for b in brands]}
+
+    return await cached(f"brands:featured:{featured}:{per_brand}", settings.cache_ttl_stable, fetch)
 
 
 @router.get("/{brand_slug}")
@@ -29,23 +48,29 @@ async def get_brand(brand_slug: str):
     slug = brand_slug_of(brand_slug)
 
     async def fetch():
+        all_brands = await phone_repo.cached_brand_list()
         async with acquire_conn() as conn:
             brand = await phone_repo.brand_detail(conn, slug)
             if brand is None:
                 return None
-            all_brands = await phone_repo.brand_list(conn)
+            total, phones = await phone_repo.search(
+                conn, filters=FilterParams(brand=slug, include_all=True), sort_by="release_year", sort_order="desc",
+                page=1, page_size=BRAND_PAGE_SIZE,
+            )
             brand["next_steps"] = await next_steps.for_brand(conn, brand, all_brands)
-            brand["indexable"] = brand_indexable(brand["total_phones"])
-            brand["similar_brands"] = [
-                {"brand": b["brand"], "brand_slug": b["brand_slug"], "path": b["path"], "phone_count": b["phone_count"]}
-                for b in sorted(
-                    (b for b in all_brands if b["brand_slug"] != slug and b.get("avg_price") and brand["price_range"]["avg"]),
-                    key=lambda b: abs(b["avg_price"] - brand["price_range"]["avg"]),
-                )[:3]
-            ]
-            return brand
+        brand["phones"] = phones
+        brand["phones_total"] = total
+        brand["indexable"] = brand_indexable(brand["total_phones"])
+        brand["similar_brands"] = [
+            {"brand": b["brand"], "brand_slug": b["brand_slug"], "path": b["path"], "phone_count": b["phone_count"]}
+            for b in sorted(
+                (b for b in all_brands if b["brand_slug"] != slug and b.get("avg_price") and brand["price_range"]["avg"]),
+                key=lambda b: abs(b["avg_price"] - brand["price_range"]["avg"]),
+            )[:3]
+        ]
+        return brand
 
-    result = await cached(f"brand:v2:{slug}", settings.cache_ttl_stable, fetch)
+    result = await cached(f"brand:v3:{slug}", settings.cache_ttl_stable, fetch)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Brand '{brand_slug}' not found.")
     return result
@@ -69,7 +94,7 @@ async def get_brand_phones(
         brand=slug, min_price=min_price, max_price=max_price, min_ram=min_ram, min_battery=min_battery,
         min_camera_mp=min_camera_mp, min_screen_size=min_screen_size, max_screen_size=max_screen_size,
         min_year=min_year, max_weight=max_weight, min_charging_w=min_charging_w, tier=tier or chipset_tier,
-        features=_csv(features), region=_region(region),
+        features=_csv(features), region=_region(region), include_all=True,
     )
 
     async def fetch():

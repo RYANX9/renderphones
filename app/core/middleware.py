@@ -57,6 +57,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         elapsed_ms = (time.monotonic() - t0) * 1_000
         response.headers["X-Request-ID"] = rid
         response.headers["X-Response-Time"] = f"{elapsed_ms:.1f}ms"
+        response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
 
         logger.info(
             '"%s %s" %d %.1fms rid=%s',

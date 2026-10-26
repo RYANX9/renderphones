@@ -7,6 +7,7 @@ without touching components.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Optional
 
@@ -24,13 +25,15 @@ from .phones import _region
 router = APIRouter(prefix="/discover", tags=["discover"])
 
 HOME_BLOCKS: list[str] = ["categories", "most_compared", "most_viewed", "coming_soon", "brands"]
+MOST_VIEWED_REFRESH_S = 5 * 86400
 
 
 async def _category_tiles(conn, region: Optional[str], limit: int | None = None) -> list[dict]:
     counts = await phone_repo.category_counts(conn)
+    tops = await phone_repo.category_tops(conn, 1, region)
     tiles = []
     for slug, cfg in CATEGORY_CONFIG.items():
-        top = await phone_repo.category_rankings(conn, slug, 1, region)
+        top = tops.get(slug)
         if not top:
             continue
         tiles.append({
@@ -41,32 +44,6 @@ async def _category_tiles(conn, region: Optional[str], limit: int | None = None)
         if limit and len(tiles) >= limit:
             break
     return tiles
-
-
-@router.get("/home")
-async def home(region: Optional[str] = Query(None)):
-    region = _region(region)
-
-    async def fetch():
-        async with acquire_conn() as conn:
-            builders = {
-                "categories": lambda: _category_tiles(conn, region, 6),
-                "most_compared": lambda: stats_repo.most_compared(conn, 6, settings.compare_display_min_sessions),
-                "most_viewed": lambda: _most_viewed(region),
-                "coming_soon": lambda: phone_repo.upcoming_by_stage(conn, 8),
-                "brands": lambda: _brands(conn),
-            }
-            blocks = []
-            for block_id in HOME_BLOCKS:
-                items = await builders[block_id]()
-                if items:
-                    blocks.append({"id": block_id, "slot": f"home.{block_id}", "items": items})
-        return {"blocks": blocks}
-
-    return await cached(f"discover:home:v3:{region}", settings.cache_ttl_trending, fetch)
-
-
-MOST_VIEWED_REFRESH_S = 5 * 86400
 
 
 async def _most_viewed(region: Optional[str]) -> list[dict]:
@@ -81,10 +58,38 @@ async def _most_viewed(region: Optional[str]) -> list[dict]:
     return await cached(f"discover:most-viewed:{bucket}:{region}", MOST_VIEWED_REFRESH_S, fetch)
 
 
-async def _brands(conn) -> list[dict]:
-    brands = await phone_repo.brand_list(conn)
+async def _brands() -> list[dict]:
+    brands = await phone_repo.cached_brand_list()
     return [{"brand": b["brand"], "brand_slug": b["brand_slug"], "path": b["path"], "phone_count": b["phone_count"]}
             for b in brands[:12]]
+
+
+async def _block(block_id: str, region: Optional[str]) -> list[dict]:
+    if block_id == "most_viewed":
+        return await _most_viewed(region)
+    if block_id == "brands":
+        return await _brands()
+    async with acquire_conn() as conn:
+        if block_id == "categories":
+            return await _category_tiles(conn, region, 6)
+        if block_id == "most_compared":
+            return await stats_repo.most_compared(conn, 6, settings.compare_display_min_sessions)
+        if block_id == "coming_soon":
+            return await phone_repo.upcoming_by_stage(conn, 8)
+    return []
+
+
+@router.get("/home")
+async def home(region: Optional[str] = Query(None)):
+    region = _region(region)
+
+    async def fetch():
+        results = await asyncio.gather(*(_block(b, region) for b in HOME_BLOCKS))
+        return {"blocks": [
+            {"id": b, "slot": f"home.{b}", "items": items} for b, items in zip(HOME_BLOCKS, results) if items
+        ]}
+
+    return await cached(f"discover:home:v4:{region}", settings.cache_ttl_trending, fetch)
 
 
 @router.get("/best-hub")
@@ -106,7 +111,7 @@ async def best_hub(region: Optional[str] = Query(None)):
         ]
         return {"groups": groups, "next_steps": steps}
 
-    return await cached(f"discover:hub:{region}", settings.cache_ttl_stable, fetch)
+    return await cached(f"discover:hub:v2:{region}", settings.cache_ttl_stable, fetch)
 
 
 @router.get("/compare-landing")
@@ -114,19 +119,20 @@ async def compare_landing():
     async def fetch():
         async with acquire_conn() as conn:
             popular = await stats_repo.most_compared(conn, 9, settings.compare_display_min_sessions)
-            matchups = []
-            for slug, cfg in CATEGORY_CONFIG.items():
-                top = await phone_repo.category_rankings(conn, slug, 2, None)
-                if len(top) >= 2:
-                    pair = sorted([top[0]["full_slug"], top[1]["full_slug"]])
-                    matchups.append({
-                        "category": {"slug": slug, "title": cfg["title"]},
-                        "path": f"/compare/{'-vs-'.join(pair)}",
-                        "phones": top[:2],
-                    })
+            tops = await phone_repo.category_tops(conn, 2, None)
+        matchups = []
+        for slug, cfg in CATEGORY_CONFIG.items():
+            top = tops.get(slug, [])
+            if len(top) >= 2:
+                pair = sorted([top[0]["full_slug"], top[1]["full_slug"]])
+                matchups.append({
+                    "category": {"slug": slug, "title": cfg["title"]},
+                    "path": f"/compare/{'-vs-'.join(pair)}",
+                    "phones": top[:2],
+                })
         return {
             "most_compared": popular, "category_matchups": matchups,
             "next_steps": [next_steps.step("compare_landing.pick", "pick", "Not sure what to compare? Help me pick", "/pick"),
                            next_steps.step("compare_landing.hub", "hub", "Browse best-of lists", next_steps.BEST_HUB)],
         }
-    return await cached("discover:compare-landing", settings.cache_ttl_trending, fetch)
+    return await cached("discover:compare-landing:v2", settings.cache_ttl_trending, fetch)

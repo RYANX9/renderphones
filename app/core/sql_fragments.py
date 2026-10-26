@@ -36,31 +36,40 @@ NOT_REGIONAL = "NOT COALESCE(p.is_regional_edition, FALSE)"
 MINI_SELECT = """p.id, p.brand, p.brand_slug, p.name, p.slug, p.full_slug, p.display_name,
 p.main_image_url, p.price_usd, p.price_basis, p.price_region, p.tier, p.overall_score"""
 
+SCORE_SELECT = """p.camera_score, p.performance_score, p.battery_score, p.display_score,
+p.build_score, p.durability_score"""
+
+# Lean list card: only what card surfaces render. Scores and spec columns are
+# opt-in through the tiers below.
 CARD_SELECT = """p.id, p.brand, p.brand_slug, p.name, p.slug, p.full_slug, p.display_name,
 p.status, p.main_image_url, p.release_year, p.release_ts, p.tier,
 p.price_usd, p.price_basis, p.price_region,
-p.overall_score, p.camera_score, p.performance_score, p.battery_score, p.display_score,
-p.build_score, p.value_score, p.durability_score,
-p.battery_capacity, p.chipset, p.screen_size, p.weight_g, p.fast_charging_w,
-p.antutu_score, p.main_camera_mp, p.ram_max_gb, p.ram_options, p.refresh_rate_hz,
-p.has_nfc, p.has_ois, p.has_telephoto, p.has_wireless_charging, p.is_foldable,
-p.is_water_resistant, p.has_headphone_jack, p.is_premium_gaming, p.water_resistance,
-p.views_7d"""
+p.overall_score, p.value_score,
+p.battery_capacity, p.screen_size, p.fast_charging_w, p.main_camera_mp, p.ram_max_gb"""
 
-# Everything a phone page or compare table needs. search_doc and offer_scopes
-# are internal and never returned.
-DETAIL_SELECT = CARD_SELECT + """,
-p.release_month, p.release_day, p.release_date_full, p.source_url, p.price_updated_at,
-p.catalog_price_usd, p.price_retailer, p.price_url, p.scored_at, p.created_at, p.updated_at,
-p.thickness_mm, p.screen_resolution, p.display_type, p.peak_brightness_nits,
-p.measured_brightness_nits, p.battery_material, p.wireless_charging_w, p.has_reverse_wireless,
-p.antutu_version, p.geekbench_single, p.geekbench_multi, p.gpu_score,
-p.storage_options, p.storage_max_gb, p.build_material, p.design_form, p.sim_layout,
-p.network_generation, p.main_sensor_format, p.main_sensor_area_mm2, p.main_aperture,
-p.optical_zoom_x, p.has_optical_zoom, p.telephoto_mp, p.is_periscope, p.has_ultrawide,
-p.ultrawide_mp, p.video_max_4k_fps, p.has_8k, p.has_dolby_vision, p.has_log_video,
-p.selfie_mp, p.camera_setup_type, p.camera_summary, p.video_resolution,
-p.compares_30d"""
+_SPEC_SELECT = """p.chipset, p.weight_g, p.ram_options, p.antutu_score, p.refresh_rate_hz, p.has_ois,
+p.has_wireless_charging, p.wireless_charging_w, p.water_resistance, p.thickness_mm,
+p.screen_resolution, p.display_type, p.peak_brightness_nits, p.geekbench_single, p.gpu_score,
+p.storage_options, p.build_material, p.optical_zoom_x, p.selfie_mp, p.camera_setup_type, p.price_url"""
+
+# Phone page header, buy box and insights. search_doc and offer_scopes stay internal.
+DETAIL_SELECT = (
+    CARD_SELECT + ",\n" + SCORE_SELECT + ",\n" + _SPEC_SELECT + """,
+p.release_date_full, p.camera_summary, p.has_telephoto, p.has_headphone_jack,
+p.is_premium_gaming, p.is_water_resistant, p.is_foldable"""
+)
+
+# Compare: the columns read by SPEC_SECTIONS / VERDICTS plus the score axes. No analysis.
+COMPARE_SELECT = CARD_SELECT + ",\n" + SCORE_SELECT + ",\n" + _SPEC_SELECT
+
+# Category lists: score axes feed best_for / reason, then the route strips them.
+CATEGORY_SELECT = (
+    CARD_SELECT + ",\n" + SCORE_SELECT +
+    ",\np.has_ois, p.has_telephoto, p.water_resistance, p.antutu_score, p.refresh_rate_hz, p.weight_g"
+)
+
+# Recommend: the extra columns are prompt context for the AI copy.
+RECOMMEND_SELECT = CARD_SELECT + ",\np.chipset, p.weight_g, p.is_foldable, p.has_wireless_charging"
 
 SORT_COL_MAP: dict[str, str] = {
     "release_ts": "p.release_ts",

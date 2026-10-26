@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 import anyio
@@ -12,7 +13,7 @@ from ..core.database import acquire_conn
 from ..core.market import resolve_offers_for_region
 from ..core.query import FilterParams
 from ..core.seo import phone_seo
-from ..core.slugs import category_path, MAX_COMPARE
+from ..core.slugs import category_path, MAX_COMPARE, phone_path
 from ..services import compare_service, next_steps, phone_repo, stats_repo
 from ..services.compare_copy import generate_compare_verdict
 from ..services.recommend_copy import generate_match_copy
@@ -36,6 +37,10 @@ def _csv(value: Optional[str]) -> list[str] | None:
 
 # ── search ───────────────────────────────────────────────────────────────────
 
+# A text search returns one page: the best matches, nothing deeper. Anyone who
+# wants something else changes the search instead of paging through it.
+SEARCH_RESULT_CAP = 24
+
 @router.get("/search")
 async def search_phones(
     request: Request,
@@ -56,6 +61,10 @@ async def search_phones(
     sort_by: str = Query("relevance"), sort_order: str = Query("desc"),
     page: int = Query(1, ge=1, le=500), page_size: int = Query(24, ge=1, le=100),
 ):
+    text_search = bool(q and q.strip())
+    if text_search:
+        page, page_size = 1, min(page_size, SEARCH_RESULT_CAP)
+
     filters = FilterParams(
         q=q, brand=brand, brands=_csv(brands), chipset=chipset, min_price=min_price, max_price=max_price,
         min_ram=min_ram, min_storage=min_storage, min_battery=min_battery, min_camera_mp=min_camera_mp,
@@ -64,20 +73,28 @@ async def search_phones(
         tier=tier or chipset_tier, has_nfc=has_nfc, has_ois=has_ois, has_wireless_charging=has_wireless_charging,
         has_headphone_jack=has_headphone_jack, is_foldable=is_foldable, is_premium_gaming=is_premium_gaming,
         camera_setup_type=camera_setup_type, water_resistant=water_resistant, features=_csv(features),
-        region=_region(region), include_upcoming=include_upcoming,
+        region=_region(region), include_upcoming=include_upcoming, include_all=True,
     )
 
     async def fetch():
         async with acquire_conn() as conn:
             total, phones = await phone_repo.search(conn, filters=filters, sort_by=sort_by, sort_order=sort_order,
-                                                    page=page, page_size=page_size)
-            out = {"total": total, "page": page, "page_size": page_size,
-                   "total_pages": max(1, -(-total // page_size)), "results": phones}
+                                                    page=page, page_size=page_size, count=not text_search)
+            if text_search:
+                out = {"total": len(phones), "has_more": total > len(phones), "page": 1, "page_size": page_size,
+                       "total_pages": 1, "results": phones}
+            else:
+                out = {"total": total, "page": page, "page_size": page_size,
+                       "total_pages": max(1, -(-total // page_size)), "results": phones}
             if total == 0:
                 out["empty"] = await _empty_search(conn, q)
             return out
 
-    return await cached(f"search:{qkey(request)}", 300, fetch)
+    # ?page=N is ignored for text searches, so it must not create new cache entries.
+    key = qkey(request) if not text_search else "&".join(
+        f"{k}={v}" for k, v in sorted(request.query_params.multi_items()) if k not in ("page", "page_size")
+    )
+    return await cached(f"search:{key}:{page_size}", 300, fetch)
 
 
 async def _empty_search(conn, q: Optional[str]) -> dict:
@@ -86,7 +103,7 @@ async def _empty_search(conn, q: Optional[str]) -> dict:
     closest: list[dict] = []
     if q and len(q.strip()) >= 2:
         rows = await conn.fetch(
-            "SELECT p.id FROM phone_catalog p WHERE p.status = 'available' AND NOT COALESCE(p.is_regional_edition, FALSE) "
+            "SELECT p.id FROM phone_catalog p WHERE TRUE "
             "ORDER BY similarity(lower(p.display_name), $1) DESC, p.overall_score DESC NULLS LAST LIMIT 6", q.strip().lower(),
         )
         minis = await phone_repo.minis_by_ids(conn, [r["id"] for r in rows])
@@ -162,32 +179,30 @@ async def resolve_full_slug(full_slug: str):
     return found
 
 
+@router.get("/search-index")
+async def search_index():
+    """Compact index of every phone for client-side autocomplete (served from the CDN)."""
+    async def fetch():
+        async with acquire_conn() as conn:
+            rows = await conn.fetch(
+                "SELECT p.id, p.brand, p.display_name, p.brand_slug, p.slug, p.price_usd, p.main_image_url "
+                "FROM phone_catalog p ORDER BY p.overall_score DESC NULLS LAST, p.id"
+            )
+        return {"phones": [
+            {"id": r["id"], "n": r["display_name"], "b": r["brand"], "p": phone_path(r["brand_slug"], r["slug"]),
+             "u": r["price_usd"], "i": r["main_image_url"]}
+            for r in rows
+        ]}
+    return await cached("phones:search-index", 3600, fetch)
+
+
 # ── detail ───────────────────────────────────────────────────────────────────
 
 async def _phone_response(phone: dict, region: Optional[str]) -> dict:
     phone = dict(phone)
     offer_rows = phone.pop("_offer_rows", [])
-    resolved = resolve_offers_for_region(offer_rows, region, include_ineligible=True)
-    phone["offers"] = resolved
+    phone["offers"] = resolve_offers_for_region(offer_rows, region, include_ineligible=True)
     phone["seo"] = phone_seo(phone, offer_rows)
-
-    async def steps():
-        async with acquire_conn() as conn:
-            return await next_steps.for_phone(conn, phone, region)
-    phone["next_steps"] = await cached(f"phone-steps:{phone['id']}:{region}", 900, steps)
-
-    self_mini = {k: phone.get(k) for k in (
-        "id", "brand", "brand_slug", "name", "slug", "full_slug", "display_name", "main_image_url",
-        "price_usd", "price_basis", "price_region", "tier", "overall_score", "path")}
-    rival_steps = [s for s in phone["next_steps"] if s["kind"] == "compare" and s.get("phone")]
-
-    async def pairs():
-        async with acquire_conn() as conn:
-            popular = await stats_repo.pairs_for_phone(conn, phone["id"], 3)
-            if popular:
-                return popular
-        return [{"path": s["href"], "phones": [self_mini, s["phone"]], "source": "rival"} for s in rival_steps][:3]
-    phone["compare_with"] = await cached(f"phone-pairs:{phone['id']}", 900, pairs)
     return phone
 
 
@@ -357,10 +372,10 @@ async def recommend_phones(
                 conn, priorities=priority_list, min_price=min_price, max_price=max_price,
                 limit=limit, region=region, budget=budget, tier=tier,
             )
-            analyses = {}
-            for p in result["phones"]:
-                a = await phone_repo.fetch_analysis(conn, p["id"])
-                analyses[p["id"]] = _first_sentence((a or {}).get("reasoning"))
+            analyses = {
+                pid: _first_sentence((a or {}).get("reasoning"))
+                for pid, a in (await phone_repo.fetch_analyses(conn, [p["id"] for p in result["phones"]])).items()
+            }
 
         if result["phones"]:
             match_copy = None
@@ -465,3 +480,36 @@ async def get_phone_offers(phone_id: int, region: Optional[str] = Query(None)):
     async with acquire_conn() as conn:
         rows = await phone_repo.fetch_offers(conn, phone_id)
     return resolve_offers_for_region(rows, _region(region), include_ineligible=True)
+
+
+@router.get("/{phone_id}/related")
+async def phone_related(phone_id: int, limit: int = Query(14, ge=1, le=30), region: Optional[str] = Query(None)):
+    """Everything relational for a phone page: similar phones, compare pairs and next steps."""
+    region = _region(region)
+
+    async def fetch():
+        async with acquire_conn() as conn:
+            anchor = await phone_repo.related_anchor(conn, phone_id)
+        if anchor is None:
+            return None
+
+        async def similar():
+            async with acquire_conn() as conn:
+                return await phone_repo.similar_phones(conn, phone_id, limit, region=region)
+
+        async def popular_pairs():
+            async with acquire_conn() as conn:
+                return await stats_repo.pairs_for_phone(conn, phone_id, 3)
+
+        similar_list, steps, pairs = await asyncio.gather(similar(), next_steps.for_phone(anchor, region), popular_pairs())
+        if not pairs:
+            pairs = [
+                {"path": s["href"], "phones": [anchor, s["phone"]], "source": "rival"}
+                for s in steps if s["kind"] == "compare" and s.get("phone")
+            ][:3]
+        return {"similar": similar_list, "compare_with": pairs, "next_steps": steps}
+
+    result = await cached(f"phone-related:{phone_id}:{region}:{limit}", 900, fetch)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Phone {phone_id} not found.")
+    return result

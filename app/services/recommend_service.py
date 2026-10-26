@@ -9,7 +9,7 @@ from ..core.database import rows_to_list
 from ..core.query import FilterParams, build_filter_where
 from ..core.scoring import HARD_FILTER_PRIORITIES, PRIORITY_SQL_EXPR
 from ..core.shaping import shape_cards
-from ..core.sql_fragments import CARD_SELECT
+from ..core.sql_fragments import RECOMMEND_SELECT
 
 # Legacy price tiers, still accepted via ?tier=s|a|b|c|d
 TIER_BOUNDS: dict[str, tuple[float, float | None]] = {
@@ -138,7 +138,7 @@ async def recommend(
             where = f"{where} AND p.price_usd < ${len(params)}"
         i = len(params) + 1
         rows = await conn.fetch(
-            f"SELECT {CARD_SELECT}, ({combined_expr}) AS match_score FROM phone_catalog p "
+            f"SELECT {RECOMMEND_SELECT}, ({combined_expr}) AS match_score FROM phone_catalog p "
             f"WHERE {where} ORDER BY {order_by} LIMIT ${i}",
             *params, pool_size,
         )

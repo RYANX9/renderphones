@@ -68,6 +68,10 @@ class FilterParams:
     include_upcoming: bool = False
     only_upcoming: bool = False
     include_regional: bool = False
+    # Show every phone in the database: any status (available, discontinued,
+    # upcoming, null, ...), regional editions, and no region hiding. Used by
+    # search and brand listings only; curated "best" lists keep their filters.
+    include_all: bool = False
 
 
 def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
@@ -83,14 +87,17 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
         return f"${len(params)}"
 
     # listing scope
-    if f.only_upcoming:
-        conditions.append(UPCOMING)
-    elif f.include_upcoming:
-        conditions.append(f"({LISTABLE} OR {UPCOMING})")
+    if f.include_all:
+        pass  # no status / regional restriction: every phone is searchable
     else:
-        conditions.append(LISTABLE)
-    if not f.include_regional:
-        conditions.append(NOT_REGIONAL)
+        if f.only_upcoming:
+            conditions.append(UPCOMING)
+        elif f.include_upcoming:
+            conditions.append(f"({LISTABLE} OR {UPCOMING})")
+        else:
+            conditions.append(LISTABLE)
+        if not f.include_regional:
+            conditions.append(NOT_REGIONAL)
 
     # text search: every token must appear in search_doc (brand + name +
     # display name + chipset), so "samsung s24" and "iphone 12" just work with
@@ -99,7 +106,10 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
         q = " ".join(f.q.strip().lower().split())
         tokens = tokenize(q)
         if tokens:
-            token_sql = " AND ".join(f"p.search_doc LIKE {add('%' + like_escape(t) + '%')}" for t in tokens)
+            # search_doc can be NULL on rows that were never backfilled; fall back
+            # to brand + name + display name so those phones are still found.
+            doc = "COALESCE(p.search_doc, lower(concat_ws(' ', p.brand, p.name, p.display_name)))"
+            token_sql = " AND ".join(f"{doc} LIKE {add('%' + like_escape(t) + '%')}" for t in tokens)
             raw, esc = add(q), add(like_escape(q))
             if len(q) >= 4:
                 conditions.append(f"(({token_sql}) OR lower(p.display_name) % {raw} OR lower(p.name) % {raw})")
@@ -110,7 +120,8 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
                 f"WHEN lower(p.name) LIKE {esc} || '%' THEN 80 "
                 f"WHEN lower(p.display_name) LIKE {esc} || '%' THEN 70 "
                 f"WHEN lower(p.display_name) LIKE '%' || {esc} || '%' THEN 55 ELSE 0 END "
-                f"+ similarity(lower(p.display_name), {raw}) * 20)"
+                f"+ similarity(lower(p.display_name), {raw}) * 20 "
+                f"+ (CASE WHEN {LISTABLE} AND {NOT_REGIONAL} THEN 5 ELSE 0 END))"
             )
 
     if f.brand:
@@ -164,14 +175,14 @@ def build_filter_where(f: FilterParams) -> tuple[str, list[Any], str | None]:
                 f"WHERE pf.phone_id = p.id AND ft.key = {add(key)})"
             )
 
-    scopes = allowed_scopes(f.region)
+    scopes = None if f.include_all else allowed_scopes(f.region)
     if scopes is not None:
         conditions.append(f"(cardinality(p.offer_scopes) = 0 OR p.offer_scopes && {add(scopes)}::text[])")
 
     if f.exclude_ids:
         conditions.append(f"p.id <> ALL({add(f.exclude_ids)}::int[])")
 
-    return " AND ".join(conditions), params, relevance_expr
+    return (" AND ".join(conditions) or "TRUE"), params, relevance_expr
 
 
 def resolve_sort(sort_by: str, sort_order: str, has_query: bool, relevance_expr: str | None = None) -> tuple[str, str]:
