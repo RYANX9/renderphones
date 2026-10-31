@@ -12,22 +12,11 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from .trusted import error_cors_headers
+
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_SKIP = frozenset({"/", "/health", "/docs", "/redoc", "/openapi.json"})
-
-# CORS headers applied to error responses generated inside these
-# middlewares. Starlette's CORSMiddleware only decorates successful
-# responses that make it back up through the stack cleanly — an
-# exception raised inside BaseHTTPMiddleware's call_next can otherwise
-# reach the client with none of that, which browsers then report as a
-# CORS failure instead of the real 500.
-_ERROR_CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "*",
-    "Access-Control-Allow-Headers": "*",
-}
-
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -51,7 +40,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 status_code=500,
                 content={"detail": "Internal server error", "request_id": rid},
-                headers={**_ERROR_CORS_HEADERS, "X-Request-ID": rid},
+                headers={**error_cors_headers(request.headers.get("origin")), "X-Request-ID": rid},
             )
 
         elapsed_ms = (time.monotonic() - t0) * 1_000
@@ -110,7 +99,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={"error": "rate_limit_exceeded", "retry_after": self._window},
-                headers={"Retry-After": str(self._window), **_ERROR_CORS_HEADERS},
+                headers={"Retry-After": str(self._window), **error_cors_headers(request.headers.get("origin"))},
             )
 
         window.append(now)
@@ -124,7 +113,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 status_code=500,
                 content={"detail": "Internal server error"},
-                headers=_ERROR_CORS_HEADERS,
+                headers=error_cors_headers(request.headers.get("origin")),
             )
 
         response.headers["X-RateLimit-Limit"] = str(self._limit)
