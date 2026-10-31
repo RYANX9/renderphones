@@ -5,6 +5,18 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+DEFAULT_ORIGINS = (
+    "https://specmob.com",
+    "https://www.specmob.com",
+    "https://specmob.vercel.app",
+    "https://specmoburls.netlify.app",
+)
+
+
+def _split_origins(raw: str) -> list[str]:
+    return [o.strip().lower().rstrip("/") for o in raw.split(",") if o.strip()]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -29,7 +41,12 @@ class Settings(BaseSettings):
     # arrives from shared Vercel egress IPs) is never throttled.
     internal_api_key: str = ""
 
-    cors_origins: str = "*"
+    # Browser origins allowed to call the API. A literal "*" is ignored.
+    cors_origins: str = ",".join(DEFAULT_ORIGINS)
+    # Subset of the above that may only read (GET/HEAD/OPTIONS): the URL generator.
+    read_only_origins: str = "https://specmoburls.netlify.app"
+    # off | log | enforce. Use `log` first to see what would be refused.
+    trusted_sources_mode: str = "enforce"
     debug: bool = False
     app_version: str = "4.0.0"
     admin_api_key: str = ""
@@ -56,7 +73,11 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        return [o for o in _split_origins(self.cors_origins) if o != "*"] or list(DEFAULT_ORIGINS)
+
+    @property
+    def read_only_origins_list(self) -> list[str]:
+        return _split_origins(self.read_only_origins)
 
 
 @lru_cache(maxsize=1)
