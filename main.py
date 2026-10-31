@@ -13,6 +13,7 @@ from app.core.reference import load_reference_data
 from app.core.database import acquire_conn, close_pool, create_pool
 from app.core.http_cache import CacheControlMiddleware
 from app.core.middleware import RateLimitMiddleware, RequestContextMiddleware
+from app.core.trusted import TrustedSourceMiddleware, error_cors_headers
 from app.jobs import scheduler
 from app.routes.admin import router as admin_router
 from app.routes.brands import router as brands_router
@@ -31,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+if "*" in settings.cors_origins.split(","):
+    logger.warning("CORS_ORIGINS contains '*'; ignoring it and using %s", settings.cors_origins_list)
+if settings.trusted_sources_mode != "off" and not settings.internal_api_key:
+    logger.warning("INTERNAL_API_KEY is not set: requests without an Origin header are NOT being blocked")
+logger.info("trusted sources mode=%s origins=%s read_only=%s",
+            settings.trusted_sources_mode, settings.cors_origins_list, settings.read_only_origins_list)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,7 +55,12 @@ async def lifespan(app: FastAPI):
     await close_pool()
 
 
-app = FastAPI(title="Specmob API", version=settings.app_version, lifespan=lifespan, default_response_class=ORJSONResponse)
+app = FastAPI(
+    title="Specmob API", version=settings.app_version, lifespan=lifespan, default_response_class=ORJSONResponse,
+    docs_url="/docs" if settings.debug else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if settings.debug else None,
+)
 
 app.add_middleware(
     CORSMiddleware, allow_origins=settings.cors_origins_list, allow_credentials=False,
@@ -60,6 +73,14 @@ app.add_middleware(
     internal_key=settings.internal_api_key,
 )
 app.add_middleware(GZipMiddleware, minimum_size=800)
+app.add_middleware(
+    TrustedSourceMiddleware,
+    origins=settings.cors_origins_list,
+    read_only_origins=settings.read_only_origins_list,
+    internal_key=settings.internal_api_key,
+    mode=settings.trusted_sources_mode,
+    exempt_paths={"/", "/health", "/health/db", "/docs", "/openapi.json"} if settings.debug else {"/", "/health", "/health/db"},
+)
 
 
 @app.exception_handler(Exception)
@@ -69,7 +90,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500, content={"detail": "Internal server error"},
-        headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "*", "Access-Control-Allow-Headers": "*"},
+        headers=error_cors_headers(request.headers.get("origin")),
     )
 
 
